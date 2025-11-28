@@ -117,16 +117,64 @@ def main():
     selector_cfgs = load_config(Path(args.config))
 
     # --- 逐个 Selector 运行 ---
-    for cfg in selector_cfgs:
+    logger.info("开始执行选股，共 %d 个配置", len(selector_cfgs))
+    for i, cfg in enumerate(selector_cfgs):
+        logger.info("正在执行第 %d/%d 个配置: %s", i+1, len(selector_cfgs), cfg)
+        
         if cfg.get("activate", True) is False:
+            logger.info("跳过未激活的配置: %s", cfg.get("alias", "未知"))
             continue
+            
         try:
             alias, selector = instantiate_selector(cfg)
+            logger.info("成功实例化selector: %s", alias)
         except Exception as e:
             logger.error("跳过配置 %s：%s", cfg, e)
             continue
 
-        picks = selector.select(trade_date, data)
+        try:
+            # 为每个selector添加执行超时保护
+            import threading
+            import queue
+            
+            def worker():
+                try:
+                    return selector.select(trade_date, data)
+                except Exception as e:
+                    raise e
+            
+            # 使用线程设置超时
+            result_queue = queue.Queue()
+            exception_queue = queue.Queue()
+            
+            def target():
+                try:
+                    result = worker()
+                    result_queue.put(result)
+                except Exception as e:
+                    exception_queue.put(e)
+            
+            thread = threading.Thread(target=target)
+            thread.daemon = True
+            thread.start()
+            # 为SuperB1战法设置更长的超时时间
+            timeout = 600 if alias == "SuperB1战法" else 100  # SuperB1战法300秒(5分钟)，其他30秒
+            thread.join(timeout=timeout)
+            
+            if thread.is_alive():
+                logger.error("选股超时: %s", alias)
+                continue
+            
+            if not exception_queue.empty():
+                exception = exception_queue.get()
+                logger.error("执行选股失败 %s：%s", alias, exception)
+                continue
+            
+            picks = result_queue.get()
+            logger.info("执行完成，选股数量: %d", len(picks))
+        except Exception as e:
+            logger.error("执行选股失败 %s：%s", alias, e)
+            continue
 
         # 将结果写入日志，同时输出到控制台
         logger.info("")
@@ -134,6 +182,7 @@ def main():
         logger.info("交易日: %s", trade_date.date())
         logger.info("符合条件股票数: %d", len(picks))
         logger.info("%s", ", ".join(picks) if picks else "无符合条件股票")
+        logger.info("完成: %s", alias)
 
 
 if __name__ == "__main__":

@@ -2,16 +2,14 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import logging
-import random
 import sys
 import time
-import threading
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import List, Optional
-import os
+from typing import List, Optional, Dict, Any
 
 import pandas as pd
 import tushare as ts
@@ -30,77 +28,6 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger("fetch_from_stocklist")
-
-# --------------------------- 限流/封禁处理配置 --------------------------- #
-COOLDOWN_SECS = 600
-BAN_PATTERNS = (
-    "访问频繁", "请稍后", "超过频率", "频繁访问",
-    "too many requests", "429",
-    "forbidden", "403",
-    "max retries exceeded"
-)
-
-# Tushare接口限速配置：每分钟最多50次
-# 采用更保守的策略，实际限制为每分钟40次，避免边界情况
-MAX_REQUESTS_PER_MINUTE = 40
-REQUEST_INTERVAL = 60.0 / MAX_REQUESTS_PER_MINUTE  # 1.5秒/次
-
-# 全局限速器
-class RateLimiter:
-    def __init__(self, interval: float):
-        self.interval = interval
-        self.last_request_time = 0
-        self.lock = threading.Lock()
-        self.request_count = 0
-        self.window_start = time.time()
-
-    def wait_if_needed(self):
-        """等待以确保不超过限速"""
-        with self.lock:
-            current_time = time.time()
-
-            # 检查是否需要重置时间窗口（每分钟重置）
-            if current_time - self.window_start >= 60:
-                self.request_count = 0
-                self.window_start = current_time
-                logger.debug(f"限速器时间窗口重置，请求计数清零")
-
-            # 如果已达到每分钟最大请求数，等待到下一分钟
-            if self.request_count >= MAX_REQUESTS_PER_MINUTE:
-                wait_time = 60 - (current_time - self.window_start) + 1  # 加1秒安全边际
-                logger.warning(f"已达到每分钟最大请求数({MAX_REQUESTS_PER_MINUTE})，等待{wait_time:.0f}秒...")
-                time.sleep(wait_time)
-                self.request_count = 0
-                self.window_start = time.time()
-                current_time = self.window_start
-
-            # 基本的间隔控制
-            time_since_last = current_time - self.last_request_time
-            if time_since_last < self.interval:
-                sleep_time = self.interval - time_since_last
-                logger.debug(f"限速等待: {sleep_time:.2f}秒")
-                time.sleep(sleep_time)
-
-            self.last_request_time = time.time()
-            self.request_count += 1
-            logger.debug(f"API请求 #{self.request_count} (窗口内)")
-
-# 全局限速器实例（将在main函数中初始化）
-rate_limiter = None
-
-def _looks_like_ip_ban(exc: Exception) -> bool:
-    msg = (str(exc) or "").lower()
-    return any(pat in msg for pat in BAN_PATTERNS)
-
-class RateLimitError(RuntimeError):
-    """表示命中限流/封禁，需要长时间冷却后重试。"""
-    pass
-
-def _cool_sleep(base_seconds: int) -> None:
-    jitter = random.uniform(0.9, 1.2)
-    sleep_s = max(1, int(base_seconds * jitter))
-    logger.warning("疑似被限流/封禁，进入冷却期 %d 秒...", sleep_s)
-    time.sleep(sleep_s)
 
 # --------------------------- 历史K线（Tushare 日线，固定qfq） --------------------------- #
 pro: Optional[ts.pro_api] = None  # 模块级会话
@@ -122,10 +49,6 @@ def _to_ts_code(code: str) -> str:
         return f"{code}.SZ"
 
 def _get_kline_tushare(code: str, start: str, end: str) -> pd.DataFrame:
-    # 限速等待（如果启用了限速）
-    if rate_limiter is not None:
-        rate_limiter.wait_if_needed()
-
     ts_code = _to_ts_code(code)
     try:
         df = ts.pro_bar(
@@ -137,8 +60,7 @@ def _get_kline_tushare(code: str, start: str, end: str) -> pd.DataFrame:
             api=pro
         )
     except Exception as e:
-        if _looks_like_ip_ban(e):
-            raise RateLimitError(str(e)) from e
+        logger.error(f"获取{code}数据失败: {e}")
         raise
 
     if df is None or df.empty:
@@ -183,6 +105,35 @@ def _filter_by_boards_stocklist(df: pd.DataFrame, exclude_boards: set[str]) -> p
         mask &= ~(ts_code.str.endswith(".BJ") | code.str.startswith(("4", "8")))
 
     return df[mask].copy()
+
+def _filter_by_st_stocks(df: pd.DataFrame, exclude_st: bool = True) -> pd.DataFrame:
+    """
+    剔除ST股票
+    - exclude_st: 是否剔除ST股票，默认True
+    """
+    if not exclude_st:
+        return df.copy()
+    
+    # 获取股票名称列，可能是'name'或其他列名
+    name_col = None
+    for col in ['name', 'stock_name', 'stockname']:
+        if col in df.columns:
+            name_col = col
+            break
+    
+    if name_col is None:
+        logger.warning("未找到股票名称列，跳过ST股票过滤")
+        return df.copy()
+    
+    # 剔除ST股票：名称以ST开头或包含ST
+    mask = ~df[name_col].str.contains(r'^ST|\*ST|ST$', na=False, regex=True)
+    filtered_df = df[mask].copy()
+    
+    removed_count = len(df) - len(filtered_df)
+    if removed_count > 0:
+        logger.info(f"已剔除{removed_count}只ST股票")
+    
+    return filtered_df
 
 def _add_market_cap_info(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -261,12 +212,16 @@ def _filter_by_market_cap(df: pd.DataFrame, min_market_cap: float, max_market_ca
 
 def load_codes_from_stocklist(stocklist_csv: Path, exclude_boards: set[str],
                              min_market_cap: Optional[float] = None,
-                             max_market_cap: Optional[float] = None) -> List[str]:
+                             max_market_cap: Optional[float] = None,
+                             exclude_st: bool = True) -> List[str]:
     """
-    从股票列表中加载股票代码，支持板块过滤和市值筛选
+    从股票列表中加载股票代码，支持板块过滤、市值筛选和ST股票剔除
     """
     df = pd.read_csv(stocklist_csv)
     df = _filter_by_boards_stocklist(df, exclude_boards)
+    
+    # 剔除ST股票
+    df = _filter_by_st_stocks(df, exclude_st)
 
     # 如果需要进行市值筛选，获取市值信息
     if min_market_cap is not None or max_market_cap is not None:
@@ -283,6 +238,8 @@ def load_codes_from_stocklist(stocklist_csv: Path, exclude_boards: set[str],
     filter_info = []
     if exclude_boards:
         filter_info.append(f"排除板块：{','.join(sorted(exclude_boards))}")
+    if exclude_st:
+        filter_info.append("剔除ST股票")
     if min_market_cap is not None or max_market_cap is not None:
         filter_info.append(f"市值范围：{min_market_cap or 0}亿-{max_market_cap or '∞'}亿")
 
@@ -290,38 +247,40 @@ def load_codes_from_stocklist(stocklist_csv: Path, exclude_boards: set[str],
                 stocklist_csv, len(codes), "；".join(filter_info) or "无过滤")
     return codes
 
-# --------------------------- 单只抓取（全量覆盖保存） --------------------------- #
+# --------------------------- 抓取函数 --------------------------- #
 def fetch_one(
     code: str,
     start: str,
     end: str,
     out_dir: Path,
-):
+) -> bool:
+    """
+    抓取单只股票数据
+    返回是否成功
+    """
     csv_path = out_dir / f"{code}.csv"
-
-    for attempt in range(1, 4):
-        try:
-            new_df = _get_kline_tushare(code, start, end)
-            if new_df.empty:
-                logger.debug("%s 无数据，生成空表。", code)
-                new_df = pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume"])
-            new_df = validate(new_df)
-            new_df.to_csv(csv_path, index=False)  # 直接覆盖保存
-            break
-        except Exception as e:
-            if _looks_like_ip_ban(e):
-                logger.error(f"{code} 第 {attempt} 次抓取疑似被封禁，沉睡 {COOLDOWN_SECS} 秒")
-                _cool_sleep(COOLDOWN_SECS)
-            else:
-                silent_seconds = 15 * attempt
-                logger.info(f"{code} 第 {attempt} 次抓取失败，{silent_seconds} 秒后重试：{e}")
-                time.sleep(silent_seconds)
-    else:
-        logger.error("%s 三次抓取均失败，已跳过！", code)
+    
+    try:
+        # 获取数据
+        df = _get_kline_tushare(code, start, end)
+        
+        if df.empty:
+            logger.debug(f"{code} 无数据，生成空表")
+            df = pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume"])
+        
+        df = validate(df)
+        df.to_csv(csv_path, index=False)
+        
+        logger.debug(f"{code} 数据更新成功，共{len(df)}条记录")
+        return True
+        
+    except Exception as e:
+        logger.error(f"处理{code}时发生异常: {e}")
+        return False
 
 # --------------------------- 主入口 --------------------------- #
 def main():
-    parser = argparse.ArgumentParser(description="从 stocklist.csv 读取股票池并用 Tushare 抓取日线K线（固定qfq，全量覆盖）")
+    parser = argparse.ArgumentParser(description="从 stocklist.csv 读取股票池并用 Tushare 抓取日线K线")
     # 抓取范围
     parser.add_argument("--start", default="20190101", help="起始日期 YYYYMMDD 或 'today'")
     parser.add_argument("--end", default="today", help="结束日期 YYYYMMDD 或 'today'")
@@ -337,14 +296,17 @@ def main():
     # 市值筛选（单位：亿元）
     parser.add_argument("--min-market-cap", type=float, default=None, help="最小市值筛选（亿元），如100表示只选市值≥100亿的股票")
     parser.add_argument("--max-market-cap", type=float, default=None, help="最大市值筛选（亿元），如2000表示只选市值≤2000亿的股票")
+    # ST股票筛选
+    parser.add_argument("--exclude-st", action="store_true", default=True, help="剔除ST股票（默认启用）")
+    parser.add_argument("--include-st", action="store_true", help="包含ST股票（与--exclude-st互斥）")
     # 其它
     parser.add_argument("--out", default="./data", help="输出目录")
     parser.add_argument("--workers", type=int, default=6, help="并发线程数")
-    parser.add_argument("--no-rate-limit", action="store_true", help="禁用限速模式（可能触发接口限制）")
-    parser.add_argument("--rate-limit-interval", type=float, default=REQUEST_INTERVAL, help=f"限速间隔秒数（默认{REQUEST_INTERVAL:.1f}秒）")
+    
     args = parser.parse_args()
 
     # ---------- Tushare Token ---------- #
+    import os
     os.environ["NO_PROXY"] = "api.waditu.com,.waditu.com,waditu.com"
     os.environ["no_proxy"] = os.environ["NO_PROXY"]
     ts_token = os.environ.get("TUSHARE_TOKEN")
@@ -354,21 +316,20 @@ def main():
     global pro
     pro = ts.pro_api()
 
-    # ---------- 限速器初始化 ---------- #
-    global rate_limiter
-    if not args.no_rate_limit:
-        rate_limit_interval = args.rate_limit_interval
-        rate_limiter = RateLimiter(rate_limit_interval)
-        logger.info(f"启用限速模式：每{rate_limit_interval:.2f}秒最多1次请求（约{60/rate_limit_interval:.0f}次/分钟）")
-    else:
-        logger.warning("禁用限速模式，可能触发接口限制！")
-
     # ---------- 日期解析 ---------- #
     start = dt.date.today().strftime("%Y%m%d") if str(args.start).lower() == "today" else args.start
     end = dt.date.today().strftime("%Y%m%d") if str(args.end).lower() == "today" else args.end
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+    
+    # ---------- ST股票筛选配置 ---------- #
+    exclude_st = args.exclude_st
+    if args.include_st:
+        exclude_st = False
+        logger.info("已启用ST股票包含模式")
+    elif args.exclude_st:
+        logger.info("已启用ST股票剔除模式")
 
     # ---------- 从 stocklist.csv 读取股票池 ---------- #
     exclude_boards = set(args.exclude_boards or [])
@@ -376,7 +337,8 @@ def main():
         args.stocklist,
         exclude_boards,
         min_market_cap=args.min_market_cap,
-        max_market_cap=args.max_market_cap
+        max_market_cap=args.max_market_cap,
+        exclude_st=exclude_st
     )
 
     if not codes:
@@ -387,6 +349,10 @@ def main():
     filter_desc = []
     if exclude_boards:
         filter_desc.append(f"排除:{','.join(sorted(exclude_boards))}")
+    if exclude_st:
+        filter_desc.append("剔除ST股票")
+    elif args.include_st:
+        filter_desc.append("包含ST股票")
     if args.min_market_cap is not None or args.max_market_cap is not None:
         min_cap = args.min_market_cap or 0
         max_cap = args.max_market_cap or '∞'
@@ -397,20 +363,37 @@ def main():
         len(codes), start, end, " | ".join(filter_desc) or "无筛选"
     )
 
-    # ---------- 多线程抓取（全量覆盖） ---------- #
+    # ---------- 执行抓取 ---------- #
+    start_time = time.time()
+    success_count = 0
+    
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
-        futures = [
-            executor.submit(
-                fetch_one,
-                code,
-                start,
-                end,
-                out_dir,
-            )
+        future_to_code = {
+            executor.submit(fetch_one, code, start, end, out_dir): code
             for code in codes
-        ]
-        for _ in tqdm(as_completed(futures), total=len(futures), desc="下载进度"):
-            pass
+        }
+        
+        for future in tqdm(as_completed(future_to_code), total=len(future_to_code), desc="下载进度"):
+            code = future_to_code[future]
+            try:
+                success = future.result()
+                if success:
+                    success_count += 1
+            except Exception as e:
+                logger.error(f"处理{code}时发生异常: {e}")
+    
+    # 输出统计信息
+    end_time = time.time()
+    duration = end_time - start_time
+    
+    logger.info("=" * 50)
+    logger.info("抓取完成统计:")
+    logger.info(f"总股票数: {len(codes)}")
+    logger.info(f"成功更新: {success_count}")
+    logger.info(f"失败数量: {len(codes) - success_count}")
+    logger.info(f"总耗时: {duration:.1f}秒")
+    logger.info(f"平均速度: {len(codes)/duration:.2f}只/秒")
+    logger.info("=" * 50)
 
     logger.info("全部任务完成，数据已保存至 %s", out_dir.resolve())
 

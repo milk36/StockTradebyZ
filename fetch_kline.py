@@ -50,20 +50,43 @@ def _to_ts_code(code: str) -> str:
 
 def _get_kline_tushare(code: str, start: str, end: str) -> pd.DataFrame:
     ts_code = _to_ts_code(code)
-    try:
-        df = ts.pro_bar(
-            ts_code=ts_code,
-            adj="qfq",
-            start_date=start,
-            end_date=end,
-            freq="D",
-            api=pro
-        )
-    except Exception as e:
-        logger.error(f"获取{code}数据失败: {e}")
-        raise
+    max_retries = 10  # 最大重试次数
+    retry_delay = 5   # 重试等待时间（秒）
+    df = None  # 初始化df变量
+    
+    for attempt in range(max_retries):
+        try:
+            df = ts.pro_bar(
+                ts_code=ts_code,
+                adj="qfq",
+                start_date=start,
+                end_date=end,
+                freq="D",
+                api=pro
+            )
+            break  # 成功获取数据，跳出重试循环
+        except Exception as e:
+            error_msg = str(e).lower()
+            # 检查是否为限流相关错误
+            if any(keyword in error_msg for keyword in ["limit", "频率", "rate", "too many", "频繁", "限速"]):
+                if attempt < max_retries - 1:  # 不是最后一次尝试
+                    logger.warning(f"获取{code}数据遇到限流，等待{retry_delay}秒后重试 (第{attempt + 1}/{max_retries}次): {e}")
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    logger.error(f"获取{code}数据失败，已达到最大重试次数{max_retries}: {e}")
+                    return pd.DataFrame()  # 返回空DataFrame而不是抛出异常
+            else:
+                # 非限流错误，直接返回空DataFrame
+                logger.error(f"获取{code}数据失败: {e}")
+                return pd.DataFrame()
 
-    if df is None or df.empty:
+    # 检查是否成功获取到数据
+    if df is None:
+        logger.warning(f"获取{code}数据失败：未能获取到数据")
+        return pd.DataFrame()
+    
+    if df.empty:
         return pd.DataFrame()
 
     df = df.rename(columns={"trade_date": "date", "vol": "volume"})[

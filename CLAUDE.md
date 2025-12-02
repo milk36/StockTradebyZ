@@ -144,7 +144,7 @@ date,open,high,low,close,volume
 ### 下载历史k线数据
 
 ```bash
-python fetch_kline.py --start 20250101 --end today --stocklist ./stocklist.csv --exclude-boards gem star bj --out ./data --workers 6
+python fetch_kline.py --start 20250101 --end today --stocklist ./stocklist.csv --exclude-boards gem star bj --out ./data --workers 6 --min-market-cap 50 --max-market-cap 1500
 ```
 
 ### 选股指令

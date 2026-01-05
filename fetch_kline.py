@@ -11,6 +11,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
+import akshare as ak
+
 import pandas as pd
 import tushare as ts
 from tqdm import tqdm
@@ -96,6 +98,44 @@ def _get_kline_tushare(code: str, start: str, end: str) -> pd.DataFrame:
     for c in ["open", "close", "high", "low", "volume"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     return df.sort_values("date").reset_index(drop=True)
+
+
+def _get_kline_akshare(code: str, start: str, end: str) -> pd.DataFrame:
+    """
+    使用 AkShare 获取单只股票历史K线数据
+    """
+    try:
+        df = ak.stock_zh_a_hist(
+            symbol=code,
+            period="daily",
+            start_date=start,
+            end_date=end,
+            adjust="qfq"
+        )
+
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        # AkShare 返回的列名: 日期, 开盘, 收盘, 最高, 最低, 成交量, 成交额, 振幅, 涨跌幅, 涨跌额, 换手率
+        df = df.rename(columns={
+            "日期": "date",
+            "开盘": "open",
+            "收盘": "close",
+            "最高": "high",
+            "最低": "low",
+            "成交量": "volume"
+        })[["date", "open", "close", "high", "low", "volume"]].copy()
+
+        df["date"] = pd.to_datetime(df["date"])
+        for c in ["open", "close", "high", "low", "volume"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+        return df.sort_values("date").reset_index(drop=True)
+
+    except Exception as e:
+        logger.error(f"获取{code}数据失败(AkShare): {e}")
+        return pd.DataFrame()
+
 
 def validate(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -270,22 +310,34 @@ def load_codes_from_stocklist(stocklist_csv: Path, exclude_boards: set[str],
                 stocklist_csv, len(codes), "；".join(filter_info) or "无过滤")
     return codes
 
+
+def _get_kline(datasource: str, code: str, start: str, end: str) -> pd.DataFrame:
+    """
+    统一数据获取函数，根据数据源选择调用对应的API
+    """
+    if datasource == "tushare":
+        return _get_kline_tushare(code, start, end)
+    else:
+        return _get_kline_akshare(code, start, end)
+
+
 # --------------------------- 抓取函数 --------------------------- #
 def fetch_one(
     code: str,
     start: str,
     end: str,
     out_dir: Path,
+    datasource: str = "akshare",
 ) -> bool:
     """
     抓取单只股票数据
     返回是否成功
     """
     csv_path = out_dir / f"{code}.csv"
-    
+
     try:
         # 获取数据
-        df = _get_kline_tushare(code, start, end)
+        df = _get_kline(datasource, code, start, end)
         
         if df.empty:
             logger.debug(f"{code} 无数据，生成空表")
@@ -303,7 +355,7 @@ def fetch_one(
 
 # --------------------------- 主入口 --------------------------- #
 def main():
-    parser = argparse.ArgumentParser(description="从 stocklist.csv 读取股票池并用 Tushare 抓取日线K线")
+    parser = argparse.ArgumentParser(description="从 stocklist.csv 读取股票池并抓取日线K线（支持 Tushare/AkShare）")
     # 抓取范围
     parser.add_argument("--start", default="20190101", help="起始日期 YYYYMMDD 或 'today'")
     parser.add_argument("--end", default="today", help="结束日期 YYYYMMDD 或 'today'")
@@ -325,19 +377,22 @@ def main():
     # 其它
     parser.add_argument("--out", default="./data", help="输出目录")
     parser.add_argument("--workers", type=int, default=6, help="并发线程数")
-    
+    parser.add_argument("--datasource", choices=["tushare", "akshare"], default="akshare", help="数据源选择（默认akshare）")
+
     args = parser.parse_args()
 
-    # ---------- Tushare Token ---------- #
-    import os
-    os.environ["NO_PROXY"] = "api.waditu.com,.waditu.com,waditu.com"
-    os.environ["no_proxy"] = os.environ["NO_PROXY"]
-    ts_token = os.environ.get("TUSHARE_TOKEN")
-    if not ts_token:
-        raise ValueError("请先设置环境变量 TUSHARE_TOKEN，例如：export TUSHARE_TOKEN=你的token")
-    ts.set_token(ts_token)
-    global pro
-    pro = ts.pro_api()
+    # ---------- 数据源初始化 ---------- #
+    if args.datasource == "tushare":
+        import os
+        os.environ["NO_PROXY"] = "api.waditu.com,.waditu.com,waditu.com"
+        os.environ["no_proxy"] = os.environ["NO_PROXY"]
+        ts_token = os.environ.get("TUSHARE_TOKEN")
+        if not ts_token:
+            raise ValueError("请先设置环境变量 TUSHARE_TOKEN，例如：set TUSHARE_TOKEN=你的token")
+        ts.set_token(ts_token)
+        global pro
+        pro = ts.pro_api()
+        logger.info("使用 Tushare 数据源")
 
     # ---------- 日期解析 ---------- #
     start = dt.date.today().strftime("%Y%m%d") if str(args.start).lower() == "today" else args.start
@@ -381,9 +436,10 @@ def main():
         max_cap = args.max_market_cap or '∞'
         filter_desc.append(f"市值:{min_cap}亿-{max_cap}亿")
 
+    datasource_name = "Tushare" if args.datasource == "tushare" else "AkShare"
     logger.info(
-        "开始抓取 %d 支股票 | 数据源:Tushare(日线,qfq) | 日期:%s → %s | %s",
-        len(codes), start, end, " | ".join(filter_desc) or "无筛选"
+        "开始抓取 %d 支股票 | 数据源:%s(日线,qfq) | 日期:%s → %s | %s",
+        len(codes), datasource_name, start, end, " | ".join(filter_desc) or "无筛选"
     )
 
     # ---------- 执行抓取 ---------- #
@@ -392,7 +448,7 @@ def main():
     
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         future_to_code = {
-            executor.submit(fetch_one, code, start, end, out_dir): code
+            executor.submit(fetch_one, code, start, end, out_dir, args.datasource): code
             for code in codes
         }
         

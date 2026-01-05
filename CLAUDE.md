@@ -145,6 +145,9 @@ date,open,high,low,close,volume
 
 ```bash
 python fetch_kline.py --start 20250101 --end today --stocklist ./stocklist.csv --exclude-boards gem star bj --out ./data --workers 6 --min-market-cap 50 --max-market-cap 1500
+
+// 排除北交所
+python fetch_kline.py --start 20250101 --end today --stocklist ./stocklist.csv --exclude-boards bj --out ./data --workers 6 --min-market-cap 50 --max-market-cap 2500
 ```
 
 ### 选股指令

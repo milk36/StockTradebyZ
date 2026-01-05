@@ -9,6 +9,9 @@
 - **策略选股**: 实现5种不同的技术分析选股策略
 - **批量处理**: 支持对股票池进行批量选股分析
 - **配置化**: 通过JSON配置文件管理策略参数
+- **板块轮动**: 提供板块轮动分析和提示词模板
+- **价格筛选**: 支持按历史价格区间筛选股票
+- **并发处理**: 使用多进程/多线程提升处理性能
 
 ### 核心技术栈
 - **Python**: 主要编程语言（支持3.11/3.12）
@@ -16,6 +19,7 @@
 - **NumPy/SciPy**: 数值计算和信号处理
 - **Tushare**: 股票数据源
 - **TQDM**: 进度条显示
+- **多进程/多线程**: 并发处理提升性能
 
 ## 项目结构
 
@@ -27,14 +31,16 @@ D:\GithubProjects\股票-量化\0_zgnb_StockTradebyZ\
 ├── Selector.py              # 策略实现模块
 ├── stocklist.csv            # 股票池文件
 ├── requirements.txt         # 项目依赖
-├── 板块轮动提示词.md        # 板块分析提示词
+├── 板块轮动提示词.md        # 板块分析提示词模板
 ├── README.md               # 项目说明文档
 ├── CLAUDE.md               # Claude相关文档
 ├── appendix.json           # 附录配置
-├── SectorShift.py          # 板块轮动分析
+├── SectorShift.py          # 板块轮动分析模块
 ├── find_stock_by_price_concurrent.py  # 价格筛选工具
 ├── data/                   # 数据存储目录
-├── data_test/              # 测试数据目录
+├── doc/                    # 文档目录
+│   ├── fetch_kline_usage.md    # 数据获取详细使用说明
+│   └── *.pdf                  # Z哥战法相关PDF文档
 └── __pycache__/            # Python缓存目录
 ```
 
@@ -77,6 +83,9 @@ export TUSHARE_TOKEN=你的token
   - 自动限流和重试机制
   - 支持排除创业板/科创板/北交所
   - 全量覆盖保存策略
+  - **新增**: 市值筛选功能（min-market-cap, max-market-cap）
+  - **新增**: ST股票剔除功能（默认启用）
+  - **新增**: 详细的参数说明和使用场景文档
 
 ### 2. Selector.py - 策略实现模块
 包含5个主要选股策略：
@@ -96,17 +105,39 @@ export TUSHARE_TOKEN=你的token
 - **输入**: data目录中的CSV数据 + configs.json配置
 - **输出**: 控制台结果 + select_results.log日志
 
+### 4. SectorShift.py - 板块轮动分析模块
+- **功能**: 板块轮动分析和行业数据处理
+- **特性**: 
+  - 从stocklist.csv加载行业信息
+  - 支持多种数据格式（CSV、feather、parquet、pkl）
+  - 提供板块轮动分析框架
+
+### 5. find_stock_by_price_concurrent.py - 价格筛选工具
+- **功能**: 按历史价格区间筛选股票
+- **特性**:
+  - 支持收盘价、最高价、最低价筛选
+  - 多进程/多线程并发处理
+  - 时间区间灵活配置
+  - 性能统计和错误处理
+
 ## 使用方法
 
 ### 1. 下载历史数据
 ```bash
-python fetch_kline.py \
-  --start 20240101 \
-  --end today \
-  --stocklist ./stocklist.csv \
-  --exclude-boards gem star bj \
-  --out ./data \
-  --workers 6
+# 基础用法
+python fetch_kline.py --start 20240101 --end today --workers 6
+
+# 市值筛选（50-2000亿）
+python fetch_kline.py --start 20240101 --end today --min-market-cap 50 --max-market-cap 2000
+
+# 排除特定板块
+python fetch_kline.py --start 20240101 --end today --exclude-boards gem star bj
+
+# 包含ST股票
+python fetch_kline.py --start 20240101 --end today --include-st
+
+# 自定义输出目录
+python fetch_kline.py --start 20240101 --end today --out ./my_data --workers 8
 ```
 
 ### 2. 运行选股策略
@@ -115,6 +146,27 @@ python select_stock.py \
   --data-dir ./data \
   --config ./configs.json \
   --date 2025-09-10
+```
+
+### 3. 价格筛选
+```bash
+# 查找历史价格在指定区间的股票
+python find_stock_by_price_concurrent.py \
+  --data-dir ./data \
+  --start-date 20240101 \
+  --end-date 20241231 \
+  --min-price 10.0 \
+  --max-price 50.0 \
+  --price-type close
+```
+
+### 4. 板块轮动分析
+```python
+# 使用SectorShift模块进行板块分析
+from SectorShift import analyze_sector_rotation
+
+# 分析板块轮动
+results = analyze_sector_rotation(data_dir="./data", stocklist_path="./stocklist.csv")
 ```
 
 ## 配置说明
@@ -134,6 +186,29 @@ python select_stock.py \
 - area: 地区
 - industry: 行业
 
+### appendix.json 配置
+用于存储额外的配置信息和数据附录。
+
+## 板块轮动分析
+
+### 提示词模板
+项目提供了多种板块轮动分析提示词模板：
+- **deepseek模板**: 适合资深证券分析师的深度分析
+- **元宝模板**: 系统化的选股分析框架
+- **指数贡献策略**: 基于权重股的指数增强策略
+
+### 支持的板块
+重点关注板块：
+- 中央汇金持股
+- 券商非银
+- 科技/半导体
+- 可控核聚变
+- 消费/白酒
+- 创新药
+- 新能源车/固态电池
+- 有色金属
+- 基建/煤炭
+
 ## 开发规范
 
 ### 代码风格
@@ -151,6 +226,13 @@ python select_stock.py \
 - 网络请求异常处理
 - 数据验证和清洗
 - 限流和重试机制
+- 并发处理错误隔离
+
+### 性能优化
+- 多进程/多线程并发处理
+- 内存使用优化
+- 批量数据处理
+- 缓存机制
 
 ## 扩展开发
 
@@ -165,12 +247,18 @@ python select_stock.py \
 - 实现数据格式标准化
 - 添加数据质量检查
 
+### 板块分析扩展
+- 添加新的板块轮动算法
+- 集成更多行业数据源
+- 实现实时板块监控
+
 ## 注意事项
 
 1. **数据获取限制**: Tushare接口有频率限制，项目已实现限流机制
 2. **免责声明**: 本项目仅供学习研究，不构成投资建议
 3. **数据准确性**: 请确保Tushare Token有效且有足够权限
 4. **风险提示**: 股市有风险，投资需谨慎
+5. **性能考虑**: 大规模数据处理时注意内存和CPU使用情况
 
 ## 常见问题
 
@@ -182,6 +270,15 @@ A: 修改configs.json中对应策略的params字段
 
 ### Q: 选股结果为空？
 A: 检查数据是否完整，策略参数是否合理，市场条件是否满足策略要求
+
+### Q: 如何使用市值筛选？
+A: 使用 `--min-market-cap` 和 `--max-market-cap` 参数（单位：亿元）
+
+### Q: 并发处理如何优化？
+A: 根据 `mp.cpu_count()` 和数据规模调整 `--workers` 参数
+
+### Q: 板块轮动分析如何使用？
+A: 参考 `板块轮动提示词.md` 中的模板，结合 `SectorShift.py` 模块
 
 ---
 

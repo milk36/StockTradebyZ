@@ -100,41 +100,64 @@ def _get_kline_tushare(code: str, start: str, end: str) -> pd.DataFrame:
     return df.sort_values("date").reset_index(drop=True)
 
 
-def _get_kline_akshare(code: str, start: str, end: str) -> pd.DataFrame:
+def _get_kline_akshare(code: str, start: str, end: str,
+                       rate_interval: float = 0.5,
+                       max_retries: int = 3) -> pd.DataFrame:
     """
     使用 AkShare 获取单只股票历史K线数据
+    - rate_interval: 请求间隔（秒），防止触发限流
+    - max_retries: 最大重试次数
     """
-    try:
-        df = ak.stock_zh_a_hist(
-            symbol=code,
-            period="daily",
-            start_date=start,
-            end_date=end,
-            adjust="qfq"
-        )
+    # 请求间隔保护
+    time.sleep(rate_interval)
 
-        if df is None or df.empty:
-            return pd.DataFrame()
+    for attempt in range(max_retries):
+        try:
+            df = ak.stock_zh_a_hist(
+                symbol=code,
+                period="daily",
+                start_date=start,
+                end_date=end,
+                adjust="qfq"
+            )
 
-        # AkShare 返回的列名: 日期, 开盘, 收盘, 最高, 最低, 成交量, 成交额, 振幅, 涨跌幅, 涨跌额, 换手率
-        df = df.rename(columns={
-            "日期": "date",
-            "开盘": "open",
-            "收盘": "close",
-            "最高": "high",
-            "最低": "low",
-            "成交量": "volume"
-        })[["date", "open", "close", "high", "low", "volume"]].copy()
+            if df is None or df.empty:
+                return pd.DataFrame()
 
-        df["date"] = pd.to_datetime(df["date"])
-        for c in ["open", "close", "high", "low", "volume"]:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
+            # AkShare 返回的列名: 日期, 开盘, 收盘, 最高, 最低, 成交量, 成交额, 振幅, 涨跌幅, 涨跌额, 换手率
+            df = df.rename(columns={
+                "日期": "date",
+                "开盘": "open",
+                "收盘": "close",
+                "最高": "high",
+                "最低": "low",
+                "成交量": "volume"
+            })[["date", "open", "close", "high", "low", "volume"]].copy()
 
-        return df.sort_values("date").reset_index(drop=True)
+            df["date"] = pd.to_datetime(df["date"])
+            for c in ["open", "close", "high", "low", "volume"]:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    except Exception as e:
-        logger.error(f"获取{code}数据失败(AkShare): {e}")
-        return pd.DataFrame()
+            return df.sort_values("date").reset_index(drop=True)
+
+        except Exception as e:
+            error_msg = str(e).lower()
+            # 检查是否为限流相关错误
+            if any(keyword in error_msg for keyword in ["limit", "频率", "rate", "too many", "频繁", "限速", "频繁请求"]):
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** (attempt + 1)  # 指数退避: 2, 4, 8秒
+                    logger.warning(f"获取{code}遇到限流，等待{wait_time}秒后重试 (第{attempt + 1}/{max_retries}次): {e}")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"获取{code}数据失败，已达到最大重试次数{max_retries}: {e}")
+                    return pd.DataFrame()
+            else:
+                # 非限流错误，直接返回空DataFrame
+                logger.error(f"获取{code}数据失败(AkShare): {e}")
+                return pd.DataFrame()
+
+    return pd.DataFrame()
 
 
 def validate(df: pd.DataFrame) -> pd.DataFrame:
@@ -143,7 +166,9 @@ def validate(df: pd.DataFrame) -> pd.DataFrame:
     df = df.drop_duplicates(subset="date").sort_values("date").reset_index(drop=True)
     if df["date"].isna().any():
         raise ValueError("存在缺失日期！")
-    if (df["date"] > pd.Timestamp.today()).any():
+    # 确保日期列是 datetime 类型后再比较
+    df_dates = pd.to_datetime(df["date"], errors="coerce")
+    if (df_dates > pd.Timestamp.today()).any():
         raise ValueError("数据包含未来日期，可能抓取错误！")
     return df
 
@@ -311,14 +336,15 @@ def load_codes_from_stocklist(stocklist_csv: Path, exclude_boards: set[str],
     return codes
 
 
-def _get_kline(datasource: str, code: str, start: str, end: str) -> pd.DataFrame:
+def _get_kline(datasource: str, code: str, start: str, end: str,
+               rate_interval: float = 0.5) -> pd.DataFrame:
     """
     统一数据获取函数，根据数据源选择调用对应的API
     """
     if datasource == "tushare":
         return _get_kline_tushare(code, start, end)
     else:
-        return _get_kline_akshare(code, start, end)
+        return _get_kline_akshare(code, start, end, rate_interval=rate_interval)
 
 
 # --------------------------- 抓取函数 --------------------------- #
@@ -328,27 +354,79 @@ def fetch_one(
     end: str,
     out_dir: Path,
     datasource: str = "akshare",
+    force_reload: bool = False,
+    rate_interval: float = 0.5,
 ) -> bool:
     """
-    抓取单只股票数据
+    抓取单只股票数据，支持增量更新
     返回是否成功
     """
     csv_path = out_dir / f"{code}.csv"
 
     try:
-        # 获取数据
-        df = _get_kline(datasource, code, start, end)
-        
+        # 判断是增量下载还是全量下载
+        if csv_path.exists() and not force_reload:
+            # 增量更新模式
+            existing_df = pd.read_csv(csv_path)
+            if not existing_df.empty:
+                # 安全解析日期
+                last_date_val = existing_df["date"].max()
+                # 使用 pd.to_datetime 确保转换为 Timestamp，然后用 .date() 获取纯日期
+                last_date_ts = pd.to_datetime(last_date_val)
+                last_date_str = last_date_ts.strftime("%Y-%m-%d")
+
+                # 解析 end 参数为 YYYY-MM-DD 格式
+                end_date = pd.to_datetime(end)
+                end_date_str = end_date.strftime("%Y-%m-%d")
+
+                # 如果本地数据已是最新，跳过下载
+                if last_date_str >= end_date_str:
+                    logger.debug(f"{code} 数据已是最新 (last: {last_date_str}), 跳过")
+                    return True
+
+                # 计算增量起始日期（last_date + 1天）
+                incremental_start = (last_date_ts + pd.Timedelta(days=1)).strftime("%Y%m%d")
+                logger.debug(f"{code} 增量下载: {incremental_start} → {end}")
+
+                # 增量下载
+                df = _get_kline(datasource, code, incremental_start, end, rate_interval=rate_interval)
+                if df.empty:
+                    return False
+
+                # 合并前统一日期列类型为字符串（避免混合类型排序失败）
+                existing_df_copy = existing_df.copy()
+                existing_df_copy["date"] = pd.to_datetime(existing_df_copy["date"]).dt.strftime("%Y-%m-%d")
+                df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+
+                # 合并新旧数据
+                df = pd.concat([existing_df_copy, df], ignore_index=True)
+                df = df.drop_duplicates(subset="date").sort_values("date").reset_index(drop=True)
+            else:
+                # 空文件，执行全量下载
+                df = _get_kline(datasource, code, start, end, rate_interval=rate_interval)
+                if df.empty:
+                    return False
+        else:
+            # 全量下载模式
+            if force_reload and csv_path.exists():
+                logger.info(f"{code} 强制全量重新下载")
+            # 确保 start 和 end 是字符串格式
+            start_str = start if isinstance(start, str) else start.strftime("%Y%m%d")
+            end_str = end if isinstance(end, str) else end.strftime("%Y%m%d")
+            df = _get_kline(datasource, code, start_str, end_str, rate_interval=rate_interval)
+            if df.empty:
+                return False
+
         if df.empty:
             logger.debug(f"{code} 无数据，生成空表")
             df = pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume"])
-        
+
         df = validate(df)
         df.to_csv(csv_path, index=False)
-        
+
         logger.debug(f"{code} 数据更新成功，共{len(df)}条记录")
         return True
-        
+
     except Exception as e:
         logger.error(f"处理{code}时发生异常: {e}")
         return False
@@ -376,8 +454,11 @@ def main():
     parser.add_argument("--include-st", action="store_true", help="包含ST股票（与--exclude-st互斥）")
     # 其它
     parser.add_argument("--out", default="./data", help="输出目录")
-    parser.add_argument("--workers", type=int, default=6, help="并发线程数")
+    parser.add_argument("--workers", type=int, default=15, help="并发线程数（默认15）")
     parser.add_argument("--datasource", choices=["tushare", "akshare"], default="akshare", help="数据源选择（默认akshare）")
+    # 性能优化参数
+    parser.add_argument("--rate-limit-interval", type=float, default=0.5, help="请求间隔（秒），防止触发API限流（默认0.5）")
+    parser.add_argument("--force-reload", action="store_true", help="强制全量重新下载（覆盖已有数据）")
 
     args = parser.parse_args()
 
@@ -448,7 +529,8 @@ def main():
     
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         future_to_code = {
-            executor.submit(fetch_one, code, start, end, out_dir, args.datasource): code
+            executor.submit(fetch_one, code, start, end, out_dir, args.datasource,
+                          force_reload=args.force_reload, rate_interval=args.rate_limit_interval): code
             for code in codes
         }
         

@@ -144,11 +144,27 @@ date,open,high,low,close,volume
 ### 下载历史k线数据
 
 ```bash
-python fetch_kline.py --start 20250101 --end today --stocklist ./stocklist.csv --exclude-boards gem star bj --out ./data --workers 6 --min-market-cap 50 --max-market-cap 1500
+# 首次全量下载（会下载所有历史数据）
+python fetch_kline.py --start 20250101 --end today --stocklist ./stocklist.csv --exclude-boards gem star bj --out ./data --workers 15 --min-market-cap 50 --max-market-cap 1500
 
-// 排除北交所
-python fetch_kline.py --start 20250101 --end today --stocklist ./stocklist.csv --exclude-boards bj --out ./data --workers 6 --min-market-cap 50 --max-market-cap 2500
+# 排除北交所
+python fetch_kline.py --start 20250101 --end today --stocklist ./stocklist.csv --exclude-boards bj --out ./data --workers 15 --min-market-cap 50 --max-market-cap 2500
+
+# 日常增量更新（自动跳过已有数据的股票，从40分钟缩短到2-5分钟）
+python fetch_kline.py --start 20250101 --end today --stocklist ./stocklist.csv --exclude-boards bj --out ./data --workers 15 --min-market-cap 50 --max-market-cap 2500
+
+# 强制全量重新下载（覆盖已有数据）
+python fetch_kline.py --start 20250101 --end today --stocklist ./stocklist.csv --exclude-boards bj --out ./data --workers 15 --force-reload
+
+# 调整请求间隔（遇到API限流时可增大）
+python fetch_kline.py --start 20250101 --end today --stocklist ./stocklist.csv --exclude-boards bj --out ./data --workers 15 --rate-limit-interval 1.0
 ```
+
+**性能优化说明：**
+- 默认启用增量更新：检测本地CSV，只下载新增数据
+- 默认并发数 15：可加速下载
+- 默认请求间隔 0.5秒：防止触发API限流
+- 如需重新下载全部数据，使用 `--force-reload` 参数
 
 ### 选股指令
 

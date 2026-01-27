@@ -100,6 +100,17 @@ def _get_kline_tushare(code: str, start: str, end: str) -> pd.DataFrame:
     return df.sort_values("date").reset_index(drop=True)
 
 
+def _to_tx_symbol(code: str) -> str:
+    """
+    将6位股票代码转换为腾讯证券格式的代码（带市场前缀）
+    例如：000001 -> sz000001, 600000 -> sh600000
+    """
+    code = str(code).zfill(6)
+    if code.startswith(("60", "68", "90", "688")):
+        return f"sh{code}"  # 上海证券交易所
+    else:
+        return f"sz{code}"  # 深圳证券交易所（000/002/003/300/301开头）
+
 def _get_kline_akshare(code: str, start: str, end: str,
                        rate_interval: float = 0.5,
                        max_retries: int = 3) -> pd.DataFrame:
@@ -111,29 +122,34 @@ def _get_kline_akshare(code: str, start: str, end: str,
     # 请求间隔保护
     time.sleep(rate_interval)
 
+    # 构造腾讯证券格式的股票代码
+    tx_symbol = _to_tx_symbol(code)
+
     for attempt in range(max_retries):
         try:
-            df = ak.stock_zh_a_hist(
-                symbol=code,
-                period="daily",
+            df = ak.stock_zh_a_hist_tx(
+                symbol=tx_symbol,
                 start_date=start,
                 end_date=end,
-                adjust="qfq"
+                adjust="qfq",
+                timeout=10.0
             )
 
             if df is None or df.empty:
                 return pd.DataFrame()
 
-            # AkShare 返回的列名: 日期, 开盘, 收盘, 最高, 最低, 成交量, 成交额, 振幅, 涨跌幅, 涨跌额, 换手率
-            df = df.rename(columns={
-                "日期": "date",
-                "开盘": "open",
-                "收盘": "close",
-                "最高": "high",
-                "最低": "low",
-                "成交量": "volume"
-            })[["date", "open", "close", "high", "low", "volume"]].copy()
+            # 腾讯接口返回英文列名: date, open, close, high, low, amount
+            # 需要将 amount 重命名为 volume（虽然实际是成交额，但保持字段名一致性）
+            df = df.rename(columns={"amount": "volume"}).copy()
 
+            # 确保包含所需的列
+            required_cols = ["date", "open", "close", "high", "low", "volume"]
+            if not all(col in df.columns for col in required_cols):
+                missing = [col for col in required_cols if col not in df.columns]
+                logger.error(f"腾讯接口返回数据缺少字段: {missing}")
+                return pd.DataFrame()
+
+            df = df[required_cols].copy()
             df["date"] = pd.to_datetime(df["date"])
             for c in ["open", "close", "high", "low", "volume"]:
                 df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -142,19 +158,24 @@ def _get_kline_akshare(code: str, start: str, end: str,
 
         except Exception as e:
             error_msg = str(e).lower()
-            # 检查是否为限流相关错误
-            if any(keyword in error_msg for keyword in ["limit", "频率", "rate", "too many", "频繁", "限速", "频繁请求"]):
+            # 可重试的错误类型：限流、连接中断、超时等
+            retry_keywords = [
+                "limit", "频率", "rate", "too many", "频繁", "限速", "频繁请求",
+                "connection", "timeout", "remote", "网络", "连接", "中断", "reset"
+            ]
+
+            if any(keyword in error_msg for keyword in retry_keywords):
                 if attempt < max_retries - 1:
                     wait_time = 2 ** (attempt + 1)  # 指数退避: 2, 4, 8秒
-                    logger.warning(f"获取{code}遇到限流，等待{wait_time}秒后重试 (第{attempt + 1}/{max_retries}次): {e}")
+                    logger.warning(f"获取{code}遇到可重试错误，等待{wait_time}秒后重试 (第{attempt + 1}/{max_retries}次): {e}")
                     time.sleep(wait_time)
                     continue
                 else:
                     logger.error(f"获取{code}数据失败，已达到最大重试次数{max_retries}: {e}")
                     return pd.DataFrame()
             else:
-                # 非限流错误，直接返回空DataFrame
-                logger.error(f"获取{code}数据失败(AkShare): {e}")
+                # 不可重试的永久性错误，直接返回空DataFrame
+                logger.error(f"获取{code}数据失败(永久性错误): {e}")
                 return pd.DataFrame()
 
     return pd.DataFrame()

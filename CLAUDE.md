@@ -56,6 +56,11 @@ python fetch_kline.py --datasource tushare --frequency 4 --min-mktcap 5e9 --max-
 
 python fetch_kline.py --start 20250101 --end today --stocklist ./stocklist.csv --exclude-boards gem star bj --out ./data --workers 6
 
+python fetch_kline.py --start 20250101 --end today --stocklist ./stocklist.csv --exclude-boards bj --out ./data --workers 6 --min-market-cap 50 --max-market-cap 2500
+
+
+python fetch_kline.py --datasource tushare --start 20250101 --end today --stocklist ./stocklist.csv --exclude-boards bj --out ./data --workers 6 --min-market-cap 50 --max-market-cap 2500
+
 # 下载市值在100-2000亿之间的股票数据
 python fetch_kline.py --start 20250101 --end today --stocklist ./stocklist.csv --exclude-boards gem star bj --out ./data --workers 2 --rate-limit-interval 2.0 --min-market-cap 100 --max-market-cap 2000
 

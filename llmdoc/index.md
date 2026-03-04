@@ -15,6 +15,7 @@
 | `Selector.py` | [策略实现模块](./Selector.md) | 技术指标计算和选股策略实现 |
 | `zgnb_zk_selector.py` | [ZGNB-ZK选股脚本](./zgnb_zk_selector.md) | 基于通达信公式的独立B1战法选股工具 |
 | `backtest_zgnb.py` | [回测脚本](./backtest_zgnb.md) | Z哥B1战法T+1/T+2回测验证工具 |
+| `analyze_backtest_features.py` | [特征分析脚本](./analyze_backtest_features.md) | 盈利股票特征分析工具 |
 
 ## 模块架构
 
@@ -138,6 +139,18 @@ python backtest_zgnb.py --list-dates
 python backtest_zgnb.py --data-dir ./data --output-dir ./my_results
 ```
 
+**方式四：特征分析**
+```bash
+# 分析盈利股票特征（默认4进程）
+python analyze_backtest_features.py --data-dir ./data --backtest-dir ./backtest_results
+
+# 使用10进程加速
+python analyze_backtest_features.py --data-dir ./data --backtest-dir ./backtest_results --workers 10
+
+# 指定输出文件
+python analyze_backtest_features.py --data-dir ./data --backtest-dir ./backtest_results --output report.txt
+```
+
 ## 配置文件
 
 ### configs.json
@@ -179,8 +192,10 @@ code,name
 | `zgnb_zk_selector.log` | ZGNB选股脚本执行日志 |
 | `zgnb_zk_results.log` | ZGNB选股结果（供回测使用，支持多日期追加） |
 | `backtest_zgnb.log` | 回测脚本执行日志 |
+| `analyze_backtest_features.log` | 特征分析脚本执行日志 |
 | `backtest_results/backtest_results.log` | 单日回测结果报告 |
 | `backtest_results/backtest_summary_all.log` | 批量回测汇总报告 |
+| `feature_analysis_report.txt` | 特征分析报告 |
 
 ## 技术栈
 
@@ -193,6 +208,7 @@ code,name
 
 | 日期 | 更新内容 |
 |------|----------|
+| 2026-03-04 | 新增 analyze_backtest_features.py 特征分析脚本，支持板块分布、技术指标对比、B1条件分析等 |
 | 2026-03-04 | backtest_zgnb.py 新增多日期批量回测支持（--all、--detail、--list-dates参数） |
 | 2026-03-04 | zgnb_zk_selector.py 新增多进程并行支持，默认10进程 |
 | 2026-03-04 | fetch_kline.py 新增AkShare多数据源支持（腾讯/东财/新浪） |
@@ -219,7 +235,8 @@ code,name
 │   ├── select_stock.md
 │   ├── Selector.md
 │   ├── zgnb_zk_selector.md
-│   └── backtest_zgnb.md
+│   ├── backtest_zgnb.md
+│   └── analyze_backtest_features.md
 ├── configs.json            # 选股配置
 ├── stocklist.csv           # 股票列表（可选）
 ├── fetch_kline.py          # 数据获取模块
@@ -227,6 +244,7 @@ code,name
 ├── Selector.py             # 策略实现模块
 ├── zgnb_zk_selector.py     # ZGNB独立选股脚本
 ├── backtest_zgnb.py        # 回测脚本
+├── analyze_backtest_features.py  # 特征分析脚本
 └── requirements.txt        # Python依赖
 ```
 

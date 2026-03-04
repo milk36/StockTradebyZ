@@ -82,6 +82,14 @@ python fetch_kline.py --start 20250101 --end today --stocklist ./stocklist.csv \
 # 排除创业板和科创板
 python fetch_kline.py --start 20250101 --end today --stocklist ./stocklist.csv \
     --exclude-boards gem star bj --out ./data --workers 15
+
+# 使用东方财富数据源
+python fetch_kline.py --start 20250101 --end today --stocklist ./stocklist.csv \
+    --exclude-boards bj --out ./data --workers 10 --akshare-source em
+
+# 强制全量重新下载（覆盖已有数据）
+python fetch_kline.py --start 20250101 --end today --stocklist ./stocklist.csv \
+    --exclude-boards bj --out ./data --workers 15 --force-reload --akshare-source cdr
 ```
 
 ### 选股执行
@@ -96,6 +104,7 @@ python select_stock.py --data-dir ./data --config ./configs.json --tickers "6000
 
 **方式二：使用 zgnb_zk_selector.py**
 ```bash
+# 默认10进程并行
 python zgnb_zk_selector.py --data-dir ./data --date 2026-01-27
 
 # 指定股票池
@@ -103,6 +112,9 @@ python zgnb_zk_selector.py --data-dir ./data --date 2026-01-27 --tickers "600000
 
 # 输出到文件
 python zgnb_zk_selector.py --data-dir ./data --date 2026-01-27 --output results.txt
+
+# 使用20进程加速
+python zgnb_zk_selector.py --data-dir ./data --date 2026-01-27 --workers 20
 ```
 
 **方式三：回测验证**
@@ -167,6 +179,8 @@ code,name
 
 | 日期 | 更新内容 |
 |------|----------|
+| 2026-03-04 | zgnb_zk_selector.py 新增多进程并行支持，默认10进程 |
+| 2026-03-04 | fetch_kline.py 新增AkShare多数据源支持（腾讯/东财/新浪） |
 | 2026-03-04 | 新增 backtest_zgnb.py 回测脚本及完整文档 |
 | 2026-03-04 | 新增 zgnb_zk_selector.py 独立选股脚本及完整文档 |
 | 2025-XX-XX | 新增暴力K战法和B1趋势战法 |

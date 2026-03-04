@@ -1,0 +1,199 @@
+# 0_zgnb_StockTradebyZ 项目文档索引
+
+> 本文档系统记录项目的代码设计实现、架构和模块划分，仅供开发人员参考。
+
+## 项目概述
+
+基于Z哥战法的A股量化选股系统，使用Python实现。主要功能包括从多个数据源获取A股历史K线数据，基于技术指标实现多种选股策略。
+
+## 核心模块
+
+| 模块 | 文档链接 | 说明 |
+|------|----------|------|
+| `fetch_kline.py` | [数据获取模块](./fetch_kline.md) | 多数据源K线数据获取，支持增量更新 |
+| `select_stock.py` | [选股执行模块](./select_stock.md) | 批量执行选股策略 |
+| `Selector.py` | [策略实现模块](./Selector.md) | 技术指标计算和选股策略实现 |
+| `zgnb_zk_selector.py` | [ZGNB-ZK选股脚本](./zgnb_zk_selector.md) | 基于通达信公式的独立B1战法选股工具 |
+
+## 模块架构
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    数据获取层                             │
+│  fetch_kline.py (AkShare/Tushare/Mootdx)               │
+└────────────────────┬────────────────────────────────────┘
+                     │ CSV数据
+                     ▼
+┌─────────────────────────────────────────────────────────┐
+│                    选股执行层                             │
+│  select_stock.py / zgnb_zk_selector.py                  │
+└────────────────────┬────────────────────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────────────────────┐
+│                    策略实现层                             │
+│  Selector.py (7种选股策略)                              │
+│  ├── BBIKDJSelector         - 少妇战法                   │
+│  ├── SuperB1Selector        - SuperB1战法                │
+│  ├── PeakKDJSelector        - 填坑战法                   │
+│  ├── BBIShortLongSelector   - 补票战法                   │
+│  ├── MA60CrossVolume...     - TePu战法                   │
+│  ├── B1TrendSelector        - B1趋势战法                 │
+│  └── BigBullishVolume...    - 暴力K战法                  │
+└─────────────────────────────────────────────────────────┘
+```
+
+## 数据格式
+
+K线数据CSV格式（每只股票一个文件）：
+```csv
+date,open,high,low,close,volume
+2025-01-01,10.5,10.8,10.3,10.6,1000000
+```
+
+## 常用命令
+
+### 环境准备
+```bash
+# 创建Python 3.12虚拟环境
+conda create -n stock python=3.12
+conda activate stock
+
+# 安装依赖
+pip install -r requirements.txt
+```
+
+### 数据获取
+```bash
+# 首次全量下载（50-2500亿市值）
+python fetch_kline.py --start 20250101 --end today --stocklist ./stocklist.csv \
+    --exclude-boards bj --out ./data --workers 15 --min-market-cap 50 --max-market-cap 2500
+
+# 日常增量更新（2-5分钟）
+python fetch_kline.py --start 20250101 --end today --stocklist ./stocklist.csv \
+    --exclude-boards bj --out ./data --workers 15
+
+# 排除创业板和科创板
+python fetch_kline.py --start 20250101 --end today --stocklist ./stocklist.csv \
+    --exclude-boards gem star bj --out ./data --workers 15
+```
+
+### 选股执行
+
+**方式一：使用 select_stock.py**
+```bash
+python select_stock.py --data-dir ./data --config ./configs.json --date 2026-01-27
+
+# 指定股票池
+python select_stock.py --data-dir ./data --config ./configs.json --tickers "600000,600001"
+```
+
+**方式二：使用 zgnb_zk_selector.py**
+```bash
+python zgnb_zk_selector.py --data-dir ./data --date 2026-01-27
+
+# 指定股票池
+python zgnb_zk_selector.py --data-dir ./data --date 2026-01-27 --tickers "600000,600001"
+
+# 输出到文件
+python zgnb_zk_selector.py --data-dir ./data --date 2026-01-27 --output results.txt
+```
+
+## 配置文件
+
+### configs.json
+
+选股策略配置文件，位于项目根目录：
+
+```json
+{
+  "selectors": [
+    {
+      "class": "BBIKDJSelector",
+      "alias": "少妇战法",
+      "activate": true,
+      "params": {
+        "j_threshold": -5,
+        "bbi_min_window": 90
+      }
+    }
+  ]
+}
+```
+
+### stocklist.csv
+
+股票列表文件（可选），用于指定下载的股票：
+
+```csv
+code,name
+600000,浦发银行
+600001,邯郸钢铁
+```
+
+## 日志文件
+
+| 日志文件 | 说明 |
+|----------|------|
+| `fetch.log` | 数据获取日志 |
+| `select_results.log` | 选股结果日志 |
+| `zgnb_zk_selector.log` | ZGNB选股脚本日志 |
+
+## 技术栈
+
+- **Python**: 3.12+
+- **数据处理**: pandas, numpy
+- **数据源**: AkShare, Tushare, Mootdx
+- **技术指标**: 自研实现（KDJ、BBI、RSI、MACD等）
+
+## 更新日志
+
+| 日期 | 更新内容 |
+|------|----------|
+| 2026-03-04 | 新增 zgnb_zk_selector.py 独立选股脚本及完整文档 |
+| 2025-XX-XX | 新增暴力K战法和B1趋势战法 |
+| 2025-XX-XX | 新增MA60金叉量能战法 |
+
+## 项目结构
+
+```
+0_zgnb_StockTradebyZ/
+├── data/                   # K线数据目录
+│   ├── 000001.csv
+│   ├── 600000.csv
+│   └── ...
+├── llmdoc/                 # 文档目录
+│   ├── index.md
+│   ├── fetch_kline.md
+│   ├── select_stock.md
+│   ├── Selector.md
+│   └── zgnb_zk_selector.md
+├── configs.json            # 选股配置
+├── stocklist.csv           # 股票列表（可选）
+├── fetch_kline.py          # 数据获取模块
+├── select_stock.py         # 选股执行模块
+├── Selector.py             # 策略实现模块
+├── zgnb_zk_selector.py     # ZGNB独立选股脚本
+└── requirements.txt        # Python依赖
+```
+
+## 开发指南
+
+### 添加新策略
+
+1. 在 `Selector.py` 中实现新策略类
+2. 继承基础接口，实现 `select()` 方法
+3. 在 `configs.json` 中添加配置项
+4. 更新文档
+
+### 数据格式约定
+
+- 所有DataFrame必须包含: date, open, high, low, close, volume
+- date列需转换为 pd.Timestamp 类型
+- 数据按日期升序排列
+
+### 命名规范
+
+- 策略类: `XxxSelector`
+- 指标函数: `compute_xxx()`
+- 辅助函数: `check_xxx()`

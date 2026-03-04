@@ -14,6 +14,7 @@
 | `select_stock.py` | [选股执行模块](./select_stock.md) | 批量执行选股策略 |
 | `Selector.py` | [策略实现模块](./Selector.md) | 技术指标计算和选股策略实现 |
 | `zgnb_zk_selector.py` | [ZGNB-ZK选股脚本](./zgnb_zk_selector.md) | 基于通达信公式的独立B1战法选股工具 |
+| `backtest_zgnb.py` | [回测脚本](./backtest_zgnb.md) | Z哥B1战法T+1/T+2回测验证工具 |
 
 ## 模块架构
 
@@ -28,8 +29,13 @@
 │                    选股执行层                             │
 │  select_stock.py / zgnb_zk_selector.py                  │
 └────────────────────┬────────────────────────────────────┘
-                     │
+                     │ 选股结果
                      ▼
+┌─────────────────────────────────────────────────────────┐
+│                    回测验证层                             │
+│  backtest_zgnb.py (T+1买入/T+2卖出回测)                 │
+└─────────────────────────────────────────────────────────┘
+
 ┌─────────────────────────────────────────────────────────┐
 │                    策略实现层                             │
 │  Selector.py (7种选股策略)                              │
@@ -99,6 +105,15 @@ python zgnb_zk_selector.py --data-dir ./data --date 2026-01-27 --tickers "600000
 python zgnb_zk_selector.py --data-dir ./data --date 2026-01-27 --output results.txt
 ```
 
+**方式三：回测验证**
+```bash
+# 运行回测
+python backtest_zgnb.py --data-dir ./data
+
+# 指定输出目录
+python backtest_zgnb.py --data-dir ./data --output-dir ./my_results
+```
+
 ## 配置文件
 
 ### configs.json
@@ -137,7 +152,9 @@ code,name
 |----------|------|
 | `fetch.log` | 数据获取日志 |
 | `select_results.log` | 选股结果日志 |
-| `zgnb_zk_selector.log` | ZGNB选股脚本日志 |
+| `zgnb_zk_selector.log` | ZGNB选股脚本执行日志 |
+| `zgnb_zk_results.log` | ZGNB选股结果（供回测使用） |
+| `backtest_zgnb.log` | 回测脚本执行日志 |
 
 ## 技术栈
 
@@ -150,6 +167,7 @@ code,name
 
 | 日期 | 更新内容 |
 |------|----------|
+| 2026-03-04 | 新增 backtest_zgnb.py 回测脚本及完整文档 |
 | 2026-03-04 | 新增 zgnb_zk_selector.py 独立选股脚本及完整文档 |
 | 2025-XX-XX | 新增暴力K战法和B1趋势战法 |
 | 2025-XX-XX | 新增MA60金叉量能战法 |
@@ -162,18 +180,22 @@ code,name
 │   ├── 000001.csv
 │   ├── 600000.csv
 │   └── ...
+├── backtest_results/       # 回测结果目录
+│   └── backtest_detail_YYYYMMDD.csv
 ├── llmdoc/                 # 文档目录
 │   ├── index.md
 │   ├── fetch_kline.md
 │   ├── select_stock.md
 │   ├── Selector.md
-│   └── zgnb_zk_selector.md
+│   ├── zgnb_zk_selector.md
+│   └── backtest_zgnb.md
 ├── configs.json            # 选股配置
 ├── stocklist.csv           # 股票列表（可选）
 ├── fetch_kline.py          # 数据获取模块
 ├── select_stock.py         # 选股执行模块
 ├── Selector.py             # 策略实现模块
 ├── zgnb_zk_selector.py     # ZGNB独立选股脚本
+├── backtest_zgnb.py        # 回测脚本
 └── requirements.txt        # Python依赖
 ```
 

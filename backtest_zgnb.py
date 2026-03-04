@@ -641,6 +641,11 @@ def main():
         help='回测所有可用日期的选股结果'
     )
     parser.add_argument(
+        '--detail',
+        action='store_true',
+        help='显示个股明细（仅在使用--all时有效）'
+    )
+    parser.add_argument(
         '--output-dir',
         default='./backtest_results',
         help='输出目录 (默认: ./backtest_results)'
@@ -681,6 +686,7 @@ def main():
 
             output_dir = Path(args.output_dir)
             all_results = []
+            detail_log_lines = []  # 用于收集个股明细日志
 
             print(f"开始回测 {len(available_dates)} 个日期的选股结果...")
             print()
@@ -707,8 +713,57 @@ def main():
                 # 保存单个日期的详细结果
                 engine.save_results_to_csv(output_dir)
 
+                # 收集个股明细日志（始终保存）
+                date_detail_lines = []
+                date_detail_lines.append(f"  日期: {target_date.strftime('%Y-%m-%d')}")
+                date_detail_lines.append(f"  总交易: {stats['total']}, 成功: {stats['success']}, 胜率: {stats.get('win_rate', 0):.1f}%")
+
+                if stats['success'] > 0:
+                    date_detail_lines.append(f"  平均收益: {stats['avg_return']:.2f}%, 盈利: {stats.get('profit_count', 0)}, 亏损: {stats.get('loss_count', 0)}")
+                    date_detail_lines.append(f"  个股明细 (按收益率排序):")
+                    date_detail_lines.append(f"  {'代码':<10} {'买入日期':<12} {'卖出日期':<12} {'买入价':<8} {'卖出价':<8} {'收益率':<10}")
+                    date_detail_lines.append("  " + "-" * 70)
+
+                    # 按收益率从高到低排序
+                    sorted_results = sorted(
+                        [r for r in engine.results if r.status == 'success'],
+                        key=lambda x: x.return_pct or 0,
+                        reverse=True
+                    )
+                    failed_results = [r for r in engine.results if r.status != 'success']
+
+                    for r in sorted_results:
+                        return_str = f"{r.return_pct:+.2f}%"
+                        line = f"  {r.code:<10} {r.buy_date.strftime('%Y-%m-%d'):<12} " \
+                               f"{r.sell_date.strftime('%Y-%m-%d'):<12} " \
+                               f"{r.buy_price:<8.2f} {r.sell_price:<8.2f} {return_str:<10}"
+                        date_detail_lines.append(line)
+
+                        # 如果指定了 --detail，则在控制台也显示
+                        if args.detail:
+                            print(line)
+
+                    # 失败的结果放在最后
+                    for r in failed_results:
+                        status_msg = {
+                            'no_data': '无数据',
+                            'no_t1': '无T+1',
+                            'no_t2': '无T+2'
+                        }.get(r.status, r.status)
+                        line = f"  {r.code:<10} {'-':<12} {'-':<12} {'-':<8} {'-':<8} {status_msg:<10}"
+                        date_detail_lines.append(line)
+
+                        if args.detail:
+                            print(line)
+
+                # 将该日期的明细添加到总日志中
+                detail_log_lines.extend(date_detail_lines)
+                detail_log_lines.append("")
+
+                # 控制台只显示摘要（除非指定了--detail）
                 print(f"  完成: 成功{stats['success']}只, 胜率{stats.get('win_rate', 0):.1f}%")
-                print()
+                if args.detail:
+                    print()  # 如果显示了明细，多加一个空行
 
             # 打印汇总报告
             print("=" * 60)
@@ -749,6 +804,7 @@ def main():
             # 保存汇总报告到文件
             summary_file = output_dir / "backtest_summary_all.log"
             with open(summary_file, 'w', encoding='utf-8') as f:
+                # 写入汇总统计表
                 f.write("=" * 60 + "\n")
                 f.write("汇总报告 - 所有日期回测结果\n")
                 f.write("=" * 60 + "\n")
@@ -772,6 +828,13 @@ def main():
                     f.write(f"{'N/A':>10} {'N/A':>8}\n")
 
                 f.write("=" * 60 + "\n")
+
+                # 写入个股明细
+                f.write("\n")
+                f.write("=" * 60 + "\n")
+                f.write("个股明细 - 所有日期\n")
+                f.write("=" * 60 + "\n")
+                f.write('\n'.join(detail_log_lines))
 
             logger.info(f"汇总报告已保存至: {summary_file}")
             return

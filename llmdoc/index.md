@@ -119,8 +119,20 @@ python zgnb_zk_selector.py --data-dir ./data --date 2026-01-27 --workers 20
 
 **方式三：回测验证**
 ```bash
-# 运行回测
+# 默认回测（使用日志中最后一个日期）
 python backtest_zgnb.py --data-dir ./data
+
+# 指定回测日期
+python backtest_zgnb.py --data-dir ./data --date 2026-01-20
+
+# 回测所有可用日期（简洁模式）
+python backtest_zgnb.py --all
+
+# 回测所有可用日期（详细模式）
+python backtest_zgnb.py --all --detail
+
+# 列出所有可用日期
+python backtest_zgnb.py --list-dates
 
 # 指定输出目录
 python backtest_zgnb.py --data-dir ./data --output-dir ./my_results
@@ -165,8 +177,10 @@ code,name
 | `fetch.log` | 数据获取日志 |
 | `select_results.log` | 选股结果日志 |
 | `zgnb_zk_selector.log` | ZGNB选股脚本执行日志 |
-| `zgnb_zk_results.log` | ZGNB选股结果（供回测使用） |
+| `zgnb_zk_results.log` | ZGNB选股结果（供回测使用，支持多日期追加） |
 | `backtest_zgnb.log` | 回测脚本执行日志 |
+| `backtest_results/backtest_results.log` | 单日回测结果报告 |
+| `backtest_results/backtest_summary_all.log` | 批量回测汇总报告 |
 
 ## 技术栈
 
@@ -179,6 +193,7 @@ code,name
 
 | 日期 | 更新内容 |
 |------|----------|
+| 2026-03-04 | backtest_zgnb.py 新增多日期批量回测支持（--all、--detail、--list-dates参数） |
 | 2026-03-04 | zgnb_zk_selector.py 新增多进程并行支持，默认10进程 |
 | 2026-03-04 | fetch_kline.py 新增AkShare多数据源支持（腾讯/东财/新浪） |
 | 2026-03-04 | 新增 backtest_zgnb.py 回测脚本及完整文档 |
@@ -195,7 +210,9 @@ code,name
 │   ├── 600000.csv
 │   └── ...
 ├── backtest_results/       # 回测结果目录
-│   └── backtest_detail_YYYYMMDD.csv
+│   ├── backtest_detail_YYYYMMDD.csv  # 单日回测明细
+│   ├── backtest_results.log          # 单日回测报告
+│   └── backtest_summary_all.log      # 批量回测汇总报告
 ├── llmdoc/                 # 文档目录
 │   ├── index.md
 │   ├── fetch_kline.md

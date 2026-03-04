@@ -28,7 +28,8 @@ backtest_zgnb.py
 │   └── BacktestResult - 单次回测结果数据结构
 │
 ├── 日志解析函数
-│   └── parse_log_file() - 解析 zgnb_zk_results.log
+│   ├── get_available_dates() - 获取所有可用选股日期
+│   └── parse_log_file() - 解析指定日期的选股结果
 │
 ├── BacktestEngine类 (核心引擎)
 │   ├── __init__(data_dir, log_file) - 初始化
@@ -44,7 +45,16 @@ backtest_zgnb.py
 
 ## 日志文件解析
 
-### zgnb_zk_results.log 格式
+### 多日期支持
+
+由于 `zgnb_zk_selector.py` 采用追加模式写入日志，`zgnb_zk_results.log` 可能包含多个日期的选股结果。回测脚本支持：
+
+1. **自动解析多个日期块**：识别日志文件中的每个选股结果块
+2. **指定日期回测**：使用 `--date` 参数指定要回测的日期
+3. **默认最新日期**：不指定日期时，自动使用日志中最后一个日期
+4. **列出可用日期**：使用 `--list-dates` 查看所有可用的选股日期
+
+### zgnb_zk_results.log 格式（多日期示例）
 
 ```
 ========================================
@@ -57,6 +67,18 @@ Z哥B1战法选股结果
 
 符合条件的股票:
 000069, 000538, 000776, 000786, ...
+========================================
+
+========================================
+Z哥B1战法选股结果
+========================================
+交易日: 2026-01-27
+数据目录: ./data
+检测股票数: 4900
+符合条件: 113
+
+符合条件的股票:
+000063, 000333, 000538, 000636, ...
 ========================================
 ```
 
@@ -109,8 +131,14 @@ class BacktestResult:
 ### 基本用法
 
 ```bash
-# 使用默认配置（data目录，zgnb_zk_results.log）
+# 默认回测（使用日志中最后一个日期）
 python backtest_zgnb.py --data-dir ./data
+
+# 指定回测日期
+python backtest_zgnb.py --data-dir ./data --date 2026-01-20
+
+# 列出日志文件中所有可用的日期
+python backtest_zgnb.py --list-dates
 
 # 指定日志文件
 python backtest_zgnb.py --data-dir ./data --log-file zgnb_zk_results.log
@@ -125,6 +153,8 @@ python backtest_zgnb.py --data-dir ./data --output-dir ./my_results
 |------|--------|------|
 | `--data-dir` | `./data` | K线数据目录 |
 | `--log-file` | `zgnb_zk_results.log` | 选股结果日志文件 |
+| `--date` | `None` | 指定回测日期 (YYYY-MM-DD)，不指定则使用日志中最后一个日期 |
+| `--list-dates` | - | 列出日志文件中所有可用的选股日期 |
 | `--output-dir` | `./backtest_results` | 输出目录 |
 
 ### 完整工作流

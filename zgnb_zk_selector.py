@@ -1324,11 +1324,11 @@ def main():
     else:
         output_file = "zgnb_zk_results.log"
 
-    # 写入文件（除非指定--no-log）
+    # 写入文件（追加模式，除非指定--no-log）
     if not args.no_log:
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.write(output_text)
-        logger.info(f"结果已保存到: {output_file}")
+        with open(output_file, "a", encoding="utf-8") as f:
+            f.write(output_text + "\n")
+        logger.info(f"结果已追加到: {output_file}")
 
 
 if __name__ == "__main__":

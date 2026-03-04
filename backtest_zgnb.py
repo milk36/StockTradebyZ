@@ -51,7 +51,34 @@ class BacktestResult:
 
 # ==================== 日志解析函数 ====================
 
-def parse_log_file(log_file: Path) -> Tuple[pd.Timestamp, List[str]]:
+def get_available_dates(log_file: Path) -> List[pd.Timestamp]:
+    """
+    获取日志文件中所有可用的选股日期
+
+    Parameters
+    ----------
+    log_file : Path
+        日志文件路径
+
+    Returns
+    -------
+    List[pd.Timestamp]
+        所有可用的选股日期列表（按出现顺序）
+    """
+    if not log_file.exists():
+        raise FileNotFoundError(f"日志文件不存在: {log_file}")
+
+    dates = []
+    with open(log_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            if line.startswith('交易日:'):
+                date_str = line.split(':', 1)[1].strip()
+                dates.append(pd.to_datetime(date_str))
+
+    return dates
+
+
+def parse_log_file(log_file: Path, target_date: Optional[pd.Timestamp] = None) -> Tuple[pd.Timestamp, List[str]]:
     """
     解析 zgnb_zk_results.log 文件
 
@@ -59,6 +86,8 @@ def parse_log_file(log_file: Path) -> Tuple[pd.Timestamp, List[str]]:
     ----------
     log_file : Path
         日志文件路径
+    target_date : Optional[pd.Timestamp]
+        目标选股日期，None 表示使用最后一个日期
 
     Returns
     -------
@@ -70,7 +99,7 @@ def parse_log_file(log_file: Path) -> Tuple[pd.Timestamp, List[str]]:
     FileNotFoundError
         日志文件不存在
     ValueError
-        无法解析选股日期
+        无法解析选股日期或目标日期不存在
     """
     if not log_file.exists():
         raise FileNotFoundError(f"日志文件不存在: {log_file}")
@@ -78,21 +107,69 @@ def parse_log_file(log_file: Path) -> Tuple[pd.Timestamp, List[str]]:
     with open(log_file, 'r', encoding='utf-8') as f:
         content = f.read()
 
-    # 提取选股日期
-    select_date = None
+    # 解析所有选股结果块
+    blocks = []
+    current_block = []
+    in_result = False
+
     for line in content.split('\n'):
+        if line.startswith('========================================') and not in_result:
+            in_result = True
+            current_block = []
+        elif in_result:
+            current_block.append(line)
+            # 遇到下一个分隔符表示块结束
+            if line.startswith('========================================') and len(current_block) > 1:
+                blocks.append(current_block[:-1])  # 去掉最后的分隔线
+                current_block = []
+
+    # 如果没有找到标准格式，尝试解析整个文件
+    if not blocks:
+        blocks = [content.split('\n')]
+
+    # 找到目标日期的块
+    target_block = None
+    selected_date = None
+
+    if target_date is None:
+        # 使用最后一个块
+        if blocks:
+            target_block = blocks[-1]
+    else:
+        # 查找匹配的日期
+        target_date_str = target_date.strftime('%Y-%m-%d')
+        for block in blocks:
+            for line in block:
+                if line.startswith('交易日:'):
+                    date_str = line.split(':', 1)[1].strip()
+                    if date_str == target_date_str:
+                        target_block = block
+                        selected_date = target_date
+                        break
+            if target_block is not None:
+                break
+
+    if target_block is None:
+        available_dates = get_available_dates(log_file)
+        date_list = ', '.join([d.strftime('%Y-%m-%d') for d in available_dates])
+        raise ValueError(
+            f"无法找到目标日期: {target_date.strftime('%Y-%m-%d') if target_date else 'None'}\n"
+            f"日志文件中可用的日期: {date_list}"
+        )
+
+    # 从目标块中提取信息
+    # 提取选股日期
+    for line in target_block:
         if line.startswith('交易日:'):
-            date_str = line.split(':', 1)[1].strip()
-            select_date = pd.to_datetime(date_str)
+            if selected_date is None:
+                date_str = line.split(':', 1)[1].strip()
+                selected_date = pd.to_datetime(date_str)
             break
 
-    if select_date is None:
-        raise ValueError(f"无法从日志文件中解析选股日期: {log_file}")
-
     # 提取股票代码
-    in_stock_section = False
     stocks = []
-    for line in content.split('\n'):
+    in_stock_section = False
+    for line in target_block:
         if '符合条件的股票:' in line:
             in_stock_section = True
             continue
@@ -102,7 +179,7 @@ def parse_log_file(log_file: Path) -> Tuple[pd.Timestamp, List[str]]:
             if line.strip():
                 stocks.extend([s.strip() for s in line.split(',') if s.strip()])
 
-    return select_date, stocks
+    return selected_date, stocks
 
 
 # ==================== 回测引擎 ====================
@@ -110,7 +187,7 @@ def parse_log_file(log_file: Path) -> Tuple[pd.Timestamp, List[str]]:
 class BacktestEngine:
     """回测引擎"""
 
-    def __init__(self, data_dir: Path, log_file: Path):
+    def __init__(self, data_dir: Path, log_file: Path, target_date: Optional[pd.Timestamp] = None):
         """
         初始化回测引擎
 
@@ -120,14 +197,17 @@ class BacktestEngine:
             K线数据目录
         log_file : Path
             选股结果日志文件
+        target_date : Optional[pd.Timestamp]
+            目标选股日期，None 表示使用日志中最后一个日期
         """
         self.data_dir = Path(data_dir)
         self.log_file = Path(log_file)
+        self.target_date = target_date
         self.results: List[BacktestResult] = []
 
     def parse_log_file(self) -> Tuple[pd.Timestamp, List[str]]:
         """解析日志文件，返回选股日期和股票代码列表"""
-        return parse_log_file(self.log_file)
+        return parse_log_file(self.log_file, self.target_date)
 
     def run_backtest(self) -> List[BacktestResult]:
         """
@@ -523,6 +603,7 @@ def main():
 使用示例:
   %(prog)s --data-dir ./data
   %(prog)s --data-dir ./data --log-file zgnb_zk_results.log
+  %(prog)s --data-dir ./data --date 2026-01-20
   %(prog)s --data-dir ./data --output-dir ./my_results
 
 回测逻辑:
@@ -542,6 +623,16 @@ def main():
         '--log-file',
         default='zgnb_zk_results.log',
         help='选股结果日志文件 (默认: zgnb_zk_results.log)'
+    )
+    parser.add_argument(
+        '--date',
+        default=None,
+        help='指定回测日期 (YYYY-MM-DD)，不指定则使用日志中最后一个日期'
+    )
+    parser.add_argument(
+        '--list-dates',
+        action='store_true',
+        help='列出日志文件中所有可用的日期'
     )
     parser.add_argument(
         '--output-dir',
@@ -564,8 +655,28 @@ def main():
         sys.exit(1)
 
     try:
+        # 列出可用日期
+        if args.list_dates:
+            available_dates = get_available_dates(log_file)
+            if not available_dates:
+                print(f"日志文件中没有找到任何选股日期: {log_file}")
+            else:
+                print(f"日志文件中可用的选股日期:")
+                for d in available_dates:
+                    print(f"  - {d.strftime('%Y-%m-%d')}")
+            return
+
+        # 解析目标日期
+        target_date = None
+        if args.date:
+            try:
+                target_date = pd.to_datetime(args.date)
+            except Exception as e:
+                logger.error(f"日期格式错误: {args.date}, 请使用 YYYY-MM-DD 格式")
+                sys.exit(1)
+
         # 创建回测引擎
-        engine = BacktestEngine(data_dir, log_file)
+        engine = BacktestEngine(data_dir, log_file, target_date)
 
         # 执行回测
         engine.run_backtest()

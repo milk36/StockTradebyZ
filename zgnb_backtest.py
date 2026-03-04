@@ -29,7 +29,7 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("backtest_zgnb.log", encoding="utf-8")
+        logging.FileHandler("zgnb_backtest.log", encoding="utf-8")
     ]
 )
 logger = logging.getLogger(__name__)

@@ -1,11 +1,12 @@
 """
 Z哥B1战法选股脚本
-基于通达信公式实现的独立选股工具
+基于通达信公式实现的独立选股工具（支持多进程并行）
 
 使用方式:
     python zgnb_zk_selector.py --data-dir ./data --date 2026-01-27
     python zgnb_zk_selector.py --data-dir ./data --date 2026-01-27 --tickers "600000,600001"
     python zgnb_zk_selector.py --data-dir ./data --date 2026-01-27 --output results.txt
+    python zgnb_zk_selector.py --data-dir ./data --date 2026-01-27 --workers 20
 """
 
 import argparse
@@ -13,6 +14,8 @@ import logging
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from concurrent.futures import ProcessPoolExecutor
+import multiprocessing
 
 import numpy as np
 import pandas as pd
@@ -930,6 +933,42 @@ def check_any_b1(df: pd.DataFrame, idx: int, code: str) -> bool:
         return False
 
 
+# ==================== 多进程处理函数 ====================
+
+def process_single_stock(args: Tuple[str, pd.DataFrame, pd.Timestamp]) -> Optional[str]:
+    """
+    处理单只股票的独立函数（用于多进程）
+
+    Parameters
+    ----------
+    args : Tuple[str, pd.DataFrame, pd.Timestamp]
+        (股票代码, K线数据, 交易日期)
+
+    Returns
+    -------
+    Optional[str]
+        符合条件返回股票代码，否则返回None
+    """
+    code, df, trade_date = args
+
+    # 过滤日期
+    hist = df[df["date"] <= trade_date].copy()
+
+    # MA114需要至少114个数据点
+    if len(hist) < 114:
+        return None
+
+    idx = len(hist) - 1
+
+    try:
+        if check_resonance_buy(hist, idx, code):
+            return code
+    except Exception:
+        pass
+
+    return None
+
+
 # ==================== 共振条件函数 ====================
 
 def check_strong_red(df: pd.DataFrame, idx: int) -> bool:
@@ -1239,9 +1278,9 @@ class ZGNBZKSelector:
             logger.debug(f"股票 {code} 选股检查出错: {e}")
             return False
 
-    def run(self, date: pd.Timestamp, codes: List[str] = None) -> List[str]:
+    def run(self, date: pd.Timestamp, codes: List[str] = None, workers: int = 10) -> List[str]:
         """
-        执行选股
+        执行选股（支持多进程并行）
 
         Parameters
         ----------
@@ -1249,6 +1288,8 @@ class ZGNBZKSelector:
             选股日期
         codes : List[str], optional
             指定股票池，None表示全部
+        workers : int, default 10
+            并行工作进程数
 
         Returns
         -------
@@ -1256,6 +1297,7 @@ class ZGNBZKSelector:
             符合条件的股票列表
         """
         logger.info(f"开始选股，日期: {date.strftime('%Y-%m-%d')}")
+        logger.info(f"使用 {workers} 个进程并行处理")
 
         data = self.load_data(codes)
 
@@ -1264,10 +1306,17 @@ class ZGNBZKSelector:
             return []
 
         results = []
-        for code, df in data.items():
-            if self.select_stock(code, df, date):
-                results.append(code)
-                logger.info(f"符合条件: {code}")
+
+        # 使用多进程并行处理
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            # 准备任务参数：(code, df, date)
+            tasks = [(code, df, date) for code, df in data.items()]
+
+            # 并行执行，收集结果
+            for result in executor.map(process_single_stock, tasks):
+                if result:
+                    results.append(result)
+                    logger.info(f"符合条件: {result}")
 
         logger.info(f"选股完成，检测 {len(data)} 只股票，符合条件 {len(results)} 只")
         return results
@@ -1282,6 +1331,7 @@ def main():
     parser.add_argument("--tickers", default="all", help="股票代码，逗号分隔，all表示全部")
     parser.add_argument("--output", help="输出文件路径，默认为zgnb_zk_results.log")
     parser.add_argument("--no-log", action="store_true", help="不保存到日志文件")
+    parser.add_argument("--workers", type=int, default=10, help="并行进程数，默认10")
 
     args = parser.parse_args()
 
@@ -1298,7 +1348,7 @@ def main():
 
     # 执行选股
     selector = ZGNBZKSelector(data_dir=Path(args.data_dir))
-    results = selector.run(trade_date, codes)
+    results = selector.run(trade_date, codes, workers=args.workers)
 
     # 输出结果
     output_lines = [

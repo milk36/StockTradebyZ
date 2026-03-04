@@ -604,6 +604,7 @@ def main():
   %(prog)s --data-dir ./data
   %(prog)s --data-dir ./data --log-file zgnb_zk_results.log
   %(prog)s --data-dir ./data --date 2026-01-20
+  %(prog)s --data-dir ./data --all
   %(prog)s --data-dir ./data --output-dir ./my_results
 
 回测逻辑:
@@ -635,6 +636,11 @@ def main():
         help='列出日志文件中所有可用的日期'
     )
     parser.add_argument(
+        '--all',
+        action='store_true',
+        help='回测所有可用日期的选股结果'
+    )
+    parser.add_argument(
         '--output-dir',
         default='./backtest_results',
         help='输出目录 (默认: ./backtest_results)'
@@ -664,6 +670,110 @@ def main():
                 print(f"日志文件中可用的选股日期:")
                 for d in available_dates:
                     print(f"  - {d.strftime('%Y-%m-%d')}")
+            return
+
+        # 回测所有日期
+        if args.all:
+            available_dates = get_available_dates(log_file)
+            if not available_dates:
+                logger.error(f"日志文件中没有找到任何选股日期: {log_file}")
+                sys.exit(1)
+
+            output_dir = Path(args.output_dir)
+            all_results = []
+
+            print(f"开始回测 {len(available_dates)} 个日期的选股结果...")
+            print()
+
+            # 对每个日期执行回测
+            for i, target_date in enumerate(available_dates, 1):
+                print(f"[{i}/{len(available_dates)}] 回测日期: {target_date.strftime('%Y-%m-%d')}")
+
+                engine = BacktestEngine(data_dir, log_file, target_date)
+                engine.run_backtest()
+
+                # 收集统计信息
+                stats = engine.generate_summary_stats()
+                all_results.append({
+                    'date': target_date,
+                    'total': stats['total'],
+                    'success': stats['success'],
+                    'profit_count': stats.get('profit_count', 0),
+                    'loss_count': stats.get('loss_count', 0),
+                    'avg_return': stats.get('avg_return'),
+                    'win_rate': stats.get('win_rate'),
+                })
+
+                # 保存单个日期的详细结果
+                engine.save_results_to_csv(output_dir)
+
+                print(f"  完成: 成功{stats['success']}只, 胜率{stats.get('win_rate', 0):.1f}%")
+                print()
+
+            # 打印汇总报告
+            print("=" * 60)
+            print("汇总报告 - 所有日期回测结果")
+            print("=" * 60)
+            print(f"{'日期':<12} {'总数':<6} {'成功':<6} {'盈利':<6} {'亏损':<6} {'平均收益':<10} {'胜率':<8}")
+            print("-" * 60)
+
+            total_success = 0
+            total_profit = 0
+            total_loss = 0
+            all_returns = []
+
+            for r in all_results:
+                return_str = f"{r['avg_return']:.2f}%" if r['avg_return'] is not None else "N/A"
+                win_rate_str = f"{r['win_rate']:.1f}%" if r['win_rate'] is not None else "N/A"
+                print(f"{r['date'].strftime('%Y-%m-%d'):<12} {r['total']:<6} {r['success']:<6} "
+                      f"{r['profit_count']:<6} {r['loss_count']:<6} {return_str:<10} {win_rate_str:<8}")
+
+                total_success += r['success']
+                total_profit += r.get('profit_count', 0)
+                total_loss += r.get('loss_count', 0)
+                if r['avg_return'] is not None:
+                    all_returns.append(r['avg_return'])
+
+            print("-" * 60)
+            print(f"{'总计':<12} {'-':<6} {total_success:<6} {total_profit:<6} {total_loss:<6} ", end="")
+
+            if all_returns:
+                avg_all_return = np.mean(all_returns)
+                avg_all_win_rate = (total_profit / total_success * 100) if total_success > 0 else 0
+                print(f"{avg_all_return:>9.2f}% {avg_all_win_rate:>7.1f}%")
+            else:
+                print(f"{'N/A':>10} {'N/A':>8}")
+
+            print("=" * 60)
+
+            # 保存汇总报告到文件
+            summary_file = output_dir / "backtest_summary_all.log"
+            with open(summary_file, 'w', encoding='utf-8') as f:
+                f.write("=" * 60 + "\n")
+                f.write("汇总报告 - 所有日期回测结果\n")
+                f.write("=" * 60 + "\n")
+                f.write(f"{'日期':<12} {'总数':<6} {'成功':<6} {'盈利':<6} {'亏损':<6} {'平均收益':<10} {'胜率':<8}\n")
+                f.write("-" * 60 + "\n")
+
+                for r in all_results:
+                    return_str = f"{r['avg_return']:.2f}%" if r['avg_return'] is not None else "N/A"
+                    win_rate_str = f"{r['win_rate']:.1f}%" if r['win_rate'] is not None else "N/A"
+                    f.write(f"{r['date'].strftime('%Y-%m-%d'):<12} {r['total']:<6} {r['success']:<6} "
+                           f"{r['profit_count']:<6} {r['loss_count']:<6} {return_str:<10} {win_rate_str:<8}\n")
+
+                f.write("-" * 60 + "\n")
+                f.write(f"{'总计':<12} {'-':<6} {total_success:<6} {total_profit:<6} {total_loss:<6} ")
+
+                if all_returns:
+                    avg_all_return = np.mean(all_returns)
+                    avg_all_win_rate = (total_profit / total_success * 100) if total_success > 0 else 0
+                    f.write(f"{avg_all_return:>9.2f}% {avg_all_win_rate:>7.1f}%\n")
+                else:
+                    f.write(f"{'N/A':>10} {'N/A':>8}\n")
+
+                f.write("=" * 60 + "\n")
+
+            logger.info(f"汇总报告已保存至: {summary_file}")
             return
 
         # 解析目标日期

@@ -11,8 +11,10 @@ run_all.py
 
 用法：
     python run_all.py
-    python run_all.py --skip-fetch     # 跳过行情下载（已有最新数据时）
-    python run_all.py --start-from 3   # 从第 3 步开始（跳过前两步）
+    python run_all.py --skip-fetch                # 跳过行情下载
+    python run_all.py --start-from 3              # 从第 3 步开始
+    python run_all.py --source tdx --stop-at 3    # TDX数据源，跑完步骤3就停
+    python run_all.py --date 2025-05-20           # 指定选股日期
 """
 from __future__ import annotations
 
@@ -87,6 +89,7 @@ def _print_recommendations() -> None:
         print(f"{rank:>4}  {code:>8}  {score_str:>6}  {signal_type:>10}  {verdict:>6}  {comment}")
 
     print(f"\n✅ 推荐购买 {len(recommendations)} 只股票（详见 {suggestion_file}）")
+    print(f"\n推荐代码：{','.join(r['code'] for r in recommendations)}")
 
 
 def main() -> None:
@@ -96,39 +99,58 @@ def main() -> None:
         help="跳过步骤 1（行情下载），直接从初选开始",
     )
     parser.add_argument(
+        "--source", choices=["tushare", "tdx"], default="tushare",
+        help="步骤 1 的数据源：tushare（默认）或 tdx（通达信本地）",
+    )
+    parser.add_argument(
         "--start-from", type=int, default=1, metavar="N",
         help="从第 N 步开始执行（1~4），跳过前面的步骤",
+    )
+    parser.add_argument(
+        "--stop-at", type=int, default=4, metavar="N",
+        help="执行到第 N 步后停止（1~4），默认 4",
+    )
+    parser.add_argument(
+        "--date", default=None, metavar="YYYY-MM-DD",
+        help="选股基准日期（默认最新交易日）",
     )
     args = parser.parse_args()
 
     start = args.start_from
-    
+    stop = args.stop_at
+
     if args.skip_fetch and start == 1:
         start = 2
 
     # ── 步骤 1：拉取 K 线数据 ─────────────────────────────────────────
-    if start <= 1:
-        _run(
-            "1/4  拉取 K 线数据（fetch_kline）",
-            [PYTHON, "-m", "pipeline.fetch_kline"],
-        )
+    if start <= 1 <= stop:
+        if args.source == "tdx":
+            _run(
+                "1/4  拉取 K 线数据（tdx_fetch — 通达信本地）",
+                [PYTHON, "-m", "pipeline.tdx_fetch"],
+            )
+        else:
+            _run(
+                "1/4  拉取 K 线数据（fetch_kline — Tushare）",
+                [PYTHON, "-m", "pipeline.fetch_kline"],
+            )
 
     # ── 步骤 2：量化初选 ─────────────────────────────────────────────
-    if start <= 2:
-        _run(
-            "2/4  量化初选（cli preselect）",
-            [PYTHON, "-m", "pipeline.cli", "preselect"],
-        )
+    if start <= 2 <= stop:
+        cmd = [PYTHON, "-m", "pipeline.cli", "preselect"]
+        if args.date:
+            cmd += ["--date", args.date]
+        _run("2/4  量化初选（cli preselect）", cmd)
 
     # ── 步骤 3：导出 K 线图 ──────────────────────────────────────────
-    if start <= 3:
+    if start <= 3 <= stop:
         _run(
             "3/4  导出 K 线图（export_kline_charts）",
             [PYTHON, str(ROOT / "dashboard" / "export_kline_charts.py")],
         )
 
     # ── 步骤 4：Gemini 图表分析 ──────────────────────────────────────
-    if start <= 4:
+    if start <= 4 <= stop:
         _run(
             "4/4  Gemini 图表分析（gemini_review）",
             [PYTHON, str(ROOT / "agent" / "gemini_review.py")],
@@ -136,8 +158,31 @@ def main() -> None:
 
     # ── 步骤 5：打印推荐结果 ─────────────────────────────────────────
     print(f"\n{'='*60}")
-    print("[步骤] 5/5  推荐购买的股票")
-    _print_recommendations()
+    if stop >= 4:
+        print("[步骤] 5/5  推荐购买的股票")
+        _print_recommendations()
+    else:
+        _print_candidate_codes()
+
+
+def _print_candidate_codes() -> None:
+    """读取 candidates_latest.json，拼接输出候选代码。"""
+    candidates_file = ROOT / "data" / "candidates" / "candidates_latest.json"
+    if not candidates_file.exists():
+        print("[ERROR] 找不到 candidates_latest.json")
+        return
+
+    with open(candidates_file, encoding="utf-8") as f:
+        data = json.load(f)
+
+    candidates = data.get("candidates", [])
+    pick_date = data.get("pick_date", "")
+    codes = [c["code"] for c in candidates if "code" in c]
+
+    print(f"  选股日期：{pick_date}")
+    print(f"  候选数量：{len(codes)} 只")
+    if codes:
+        print(f"\n候选代码：{','.join(codes)}")
 
 
 if __name__ == "__main__":

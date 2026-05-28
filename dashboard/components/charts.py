@@ -1,6 +1,9 @@
 """
 dashboard/components/charts.py
-K线 / 知行线 / 量能 / 砖型图 — Plotly 图表组件（亮色主题，双周期）
+K线 / 知行线 / 量能 — matplotlib 图表组件（白底，双周期）
+
+参考 zgnb_Backtrader 项目的 src/charting/kline_chart.py 实现，
+使用纯 matplotlib 手绘蜡烛图，不依赖 plotly/kaleido。
 """
 from __future__ import annotations
 
@@ -8,79 +11,35 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.collections import PatchCollection
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+
+plt.rcParams["font.sans-serif"] = ["SimHei", "Microsoft YaHei", "DejaVu Sans"]
+plt.rcParams["axes.unicode_minus"] = False
 
 _ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(_ROOT))
 
-# ─────────────────────────────────────────────────────────────────────────────
-# rangebreaks 工具
-# ─────────────────────────────────────────────────────────────────────────────
+# ── 颜色常量 ────────────────────────────────────────────────────────────────
+COLOR_YANG = "#dc3545"      # 阳线红
+COLOR_YIN = "#28a745"       # 阴线绿
+COLOR_ZXDQ = "#e67e22"      # 知行短期线（橙）
+COLOR_ZXDKX = "#2980b9"     # 知行多空线（蓝）
+GRID_ALPHA = 0.3
 
-def _calc_rangebreaks_daily(trade_dates: pd.DatetimeIndex) -> list[dict]:
-    """
-    根据实际交易日期动态计算 rangebreaks，彻底去除所有空缺（含节假日）。
-
-    原理：
-      1. 排除周末（bounds=["sat","mon"]）
-      2. 找出 [min_date, max_date] 范围内所有工作日（周一~周五）中，
-         实际不存在交易记录的日期 → 即节假日 + 停牌日 → 加入 values
-    """
-    if len(trade_dates) == 0:
-        return [dict(bounds=["sat", "mon"])]
-
-    min_d = trade_dates.min()
-    max_d = trade_dates.max()
-    biz_days = pd.bdate_range(min_d, max_d)          # 所有工作日（周一~周五）
-    trade_set = set(trade_dates.normalize())          # 实际交易日集合
-    missing = [d.strftime("%Y-%m-%d") for d in biz_days if d not in trade_set]
-
-    breaks: list[dict] = [dict(bounds=["sat", "mon"])]
-    if missing:
-        breaks.append(dict(values=missing))
-    return breaks
-
-
-def _calc_rangebreaks_weekly(all_daily_dates: pd.DatetimeIndex) -> list[dict]:
-    """
-    根据完整日线交易日期计算周线 rangebreaks，去除因长节假日产生的空周。
-
-    必须传入完整日线日期（而非截断后的周线日期），才能正确覆盖截断窗口
-    边界之外的空周（如春节整周落在窗口起点之前一周）。
-
-    原理：枚举 [min, max] 范围内所有理论周五，找出整周无交易日的空周，
-    然后将该空周的每个工作日（Mon-Fri）逐一加入 values（而非用 dvalue=7天），
-    避免与 bounds=["sat","mon"] 产生重叠扣除，导致显示间距异常。
-    """
-    if len(all_daily_dates) == 0:
-        return [dict(bounds=["sat", "mon"])]
-
-    min_d = all_daily_dates.min()
-    max_d = all_daily_dates.max()
-    all_fridays = pd.date_range(min_d, max_d, freq="W-FRI")
-
-    # 构建「每个周五所在自然周」→「是否有交易」的映射
-    # 自然周工作日：周一(fri-4天) ~ 周五(fri)
-    trade_set = set(all_daily_dates.normalize())
-    missing_workdays: list[str] = []
-    for fri in all_fridays:
-        week_workdays = pd.date_range(fri - pd.Timedelta(days=4), fri)  # Mon-Fri
-        if not any(d in trade_set for d in week_workdays):
-            # 整周无交易 → 逐日加入（只加工作日，与 bounds 无重叠）
-            for wd in week_workdays:
-                missing_workdays.append(wd.strftime("%Y-%m-%d"))
-
-    breaks: list[dict] = [dict(bounds=["sat", "mon"])]
-    if missing_workdays:
-        breaks.append(dict(values=missing_workdays))
-    return breaks
+# ── 图表尺寸 ────────────────────────────────────────────────────────────────
+DPI = 150
+FIG_WIDTH = 14
+FIG_HEIGHT = 7
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 指标计算
+# 指标计算（保留原函数，供 dashboard app 复用）
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _calc_ma(series: pd.Series, window: int) -> pd.Series:
@@ -93,15 +52,8 @@ def _calc_kdj(
     m1: int = 3,
     m2: int = 3,
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
-    """
-    计算 KDJ 指标（通达信标准公式）。
-    RSV = (close - LLV(low,n)) / (HHV(high,n) - LLV(low,n)) * 100
-    K = EMA(RSV, alpha=1/m1)  （等价 SMA(RSV,m1,1)）
-    D = EMA(K,   alpha=1/m2)
-    J = 3K - 2D
-    """
-    high  = df["high"].astype(float)
-    low   = df["low"].astype(float)
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
     close = df["close"].astype(float)
 
     llv = low.rolling(n, min_periods=1).min()
@@ -124,13 +76,8 @@ def _calc_zx_lines(
     zxdq_span: int = 10,
     m1: int = 14, m2: int = 28, m3: int = 57, m4: int = 114,
 ) -> tuple[pd.Series, pd.Series]:
-    """
-    知行短期线 (zxdq)  = double-EWM(span)
-    知行多空线 (zxdkx) = 四均线均值 MA(m1,m2,m3,m4)
-    应在完整历史数据上调用，确保预热期足够。
-    """
     close = df["close"].astype(float)
-    zxdq  = close.ewm(span=zxdq_span, adjust=False).mean().ewm(span=zxdq_span, adjust=False).mean()
+    zxdq = close.ewm(span=zxdq_span, adjust=False).mean().ewm(span=zxdq_span, adjust=False).mean()
     zxdkx = (
         close.rolling(m1, min_periods=m1).mean()
         + close.rolling(m2, min_periods=m2).mean()
@@ -140,63 +87,14 @@ def _calc_zx_lines(
     return zxdq, zxdkx
 
 
-def prepare_daily_indicators(
-    df: pd.DataFrame,
-    zx_params: Optional[dict] = None,
-    brick_params: Optional[dict] = None,
-) -> pd.DataFrame:
-    """
-    在完整日线 DataFrame 上预计算所有指标列，返回带指标列的 df。
-    需在截断 bars 之前调用，保证指标预热期足够。
-
-    新增列：
-      _zxdq   — 知行短期线
-      _zxdkx  — 知行多空线
-      _brick  — 砖型图值
-      _kdj_k  — KDJ K 值
-      _kdj_d  — KDJ D 值
-      _kdj_j  — KDJ J 值
-    """
-    zx_params    = zx_params    or {}
-    brick_params = brick_params or {}
-
-    df = df.copy()
-    df["date"] = pd.to_datetime(df["date"])
-    df = df.sort_values("date").reset_index(drop=True)
-
-    zxdq, zxdkx = _calc_zx_lines(df, **zx_params)
-    df["_zxdq"]  = zxdq.values
-    df["_zxdkx"] = zxdkx.values
-    df["_brick"] = _calc_brick(df, **brick_params).values
-
-    k, d, j = _calc_kdj(df)
-    df["_kdj_k"] = k.values
-    df["_kdj_d"] = d.values
-    df["_kdj_j"] = j.values
-
-    return df
-
-
 def _calc_brick(
     df: pd.DataFrame,
     n: int = 4, m1: int = 4, m2: int = 6, m3: int = 6,
     t: float = 4.0, shift1: float = 90.0, shift2: float = 100.0,
     sma_w1: int = 1, sma_w2: int = 1, sma_w3: int = 1,
 ) -> pd.Series:
-    """
-    计算砖型图的 raw 值（通达信 VAR6A = VAR5A - VAR2A，clip 于 t）。
-
-    注意：此函数返回 raw（即通达信"砖型图"本身），而非差分后的 brick。
-    raw[i] = max(VAR5A[i] - VAR2A[i] - t, 0)
-
-    砖型图涨跌（通达信 STICKLINE）需要比较 raw[i] 与 raw[i-1]：
-      - raw[i] > raw[i-1]：红柱（上涨）
-      - raw[i] < raw[i-1]：绿柱（下跌）
-    绘图时每根柱从 raw[i-1]（前日尾部）画到 raw[i]（本日头部）。
-    """
-    # 纯 numpy/pandas 实现（同 Selector._compute_brick_numba 逻辑，但返回 raw 而非 brick）
-    high  = df["high"].values.astype(float)
-    low   = df["low"].values.astype(float)
+    high = df["high"].values.astype(float)
+    low = df["low"].values.astype(float)
     close = df["close"].values.astype(float)
     length = len(close)
 
@@ -233,11 +131,29 @@ def _calc_brick(
     return pd.Series(raw, index=df.index)
 
 
+def prepare_daily_indicators(
+    df: pd.DataFrame,
+    zx_params: Optional[dict] = None,
+    brick_params: Optional[dict] = None,
+) -> pd.DataFrame:
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date").reset_index(drop=True)
+
+    zxdq, zxdkx = _calc_zx_lines(df, **(zx_params or {}))
+    df["_zxdq"] = zxdq.values
+    df["_zxdkx"] = zxdkx.values
+    df["_brick"] = _calc_brick(df, **(brick_params or {})).values
+
+    k, d, j = _calc_kdj(df)
+    df["_kdj_k"] = k.values
+    df["_kdj_d"] = d.values
+    df["_kdj_j"] = j.values
+
+    return df
+
+
 def _build_weekly_df(df: pd.DataFrame) -> pd.DataFrame:
-    """日线 DataFrame → 周线 OHLCV DataFrame。
-    使用 'W-FRI'（以周五为周末）对齐，确保每周最后一个实际交易日落在正确的周桶内。
-    dropna 保证只保留有完整 OHLCV 的周。
-    """
     d = df.copy()
     d["date"] = pd.to_datetime(d["date"])
     d = d.set_index("date").sort_index()
@@ -248,148 +164,144 @@ def _build_weekly_df(df: pd.DataFrame) -> pd.DataFrame:
         close=("close", "last"),
         volume=("volume", "sum"),
     ).dropna(subset=["open", "close"])
-    weekly = weekly.reset_index()          # index -> date 列
+    weekly = weekly.reset_index()
     return weekly
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 公共布局参数
+# matplotlib 绘图核心
 # ─────────────────────────────────────────────────────────────────────────────
 
-_LIGHT_LAYOUT = dict(
-    template="plotly_white",
-    paper_bgcolor="#ffffff",
-    plot_bgcolor="#ffffff",
-    font=dict(color="#1f2328", size=12),
-    margin=dict(l=10, r=10, t=40, b=10),
-    legend=dict(
-        orientation="h",
-        yanchor="bottom", y=1.01,
-        xanchor="right",  x=1,
-        font=dict(size=11),
-        bgcolor="rgba(255,255,255,0)",
-    ),
-    xaxis_rangeslider_visible=False,
-    hovermode="x unified",
-)
+def _draw_candlestick(ax, opens, closes, highs, lows, n):
+    """绘制 K 线蜡烛图"""
+    x = np.arange(n)
 
-_GRID_COLOR   = "rgba(0,0,0,0.07)"
-_ZERO_COLOR   = "rgba(0,0,0,0.25)"
+    # 影线
+    ax.vlines(x, lows, highs, colors="#888888", linewidths=0.5)
+
+    # 实体
+    rects = []
+    colors = []
+    for i in range(n):
+        o, c = float(opens[i]), float(closes[i])
+        if np.isnan(o) or np.isnan(c):
+            continue
+        body_bottom = min(o, c)
+        body_height = abs(c - o)
+        if body_height < 0.001:
+            body_height = c * 0.002
+        rect = mpatches.Rectangle((x[i] - 0.35, body_bottom), 0.7, body_height)
+        rects.append(rect)
+        colors.append(COLOR_YANG if c >= o else COLOR_YIN)
+
+    if rects:
+        collection = PatchCollection(rects, facecolors=colors,
+                                      edgecolors=colors, linewidths=0.5)
+        ax.add_collection(collection)
+
+    ax.set_xlim(-1, n)
+    valid_mask = ~np.isnan(highs) & ~np.isnan(lows)
+    if valid_mask.any():
+        y_min = np.nanmin(lows[valid_mask])
+        y_max = np.nanmax(highs[valid_mask])
+        margin = (y_max - y_min) * 0.08
+        ax.set_ylim(y_min - margin, y_max + margin)
 
 
-def _apply_axis_style(fig: go.Figure, n_rows: int, rangebreaks: list[dict]) -> None:
-    """统一设置所有子图的坐标轴样式。"""
-    for i in range(1, n_rows + 1):
-        xname = "xaxis" if i == 1 else f"xaxis{i}"
-        yname = "yaxis" if i == 1 else f"yaxis{i}"
-        fig.update_layout(**{xname: dict(
-            rangebreaks=rangebreaks,
-            showgrid=False,
-            linecolor="#d0d7de",
-            tickfont=dict(color="#636c76"),
-        )})
-        fig.update_layout(**{yname: dict(
-            showgrid=True,
-            gridcolor=_GRID_COLOR,
-            zeroline=False,
-            linecolor="#d0d7de",
-            tickfont=dict(color="#636c76"),
-        )})
+def _draw_volume(ax, x, volumes, opens, closes, n):
+    """绘制成交量柱"""
+    colors = []
+    for i in range(n):
+        c, o = float(closes[i]), float(opens[i])
+        if np.isnan(c) or np.isnan(o):
+            colors.append(COLOR_YIN)
+        else:
+            colors.append(COLOR_YANG if c >= o else COLOR_YIN)
+    ax.bar(x, volumes, width=0.7, color=colors, alpha=0.7)
+    ax.set_xlim(-1, n)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 日线图：K线 + 知行线 + 量能 + 砖型图
+# 日线图
 # ─────────────────────────────────────────────────────────────────────────────
 
 def make_daily_chart(
     df: pd.DataFrame,
     code: str,
-    volume_up_color: str = "rgba(220,53,69,0.7)",
-    volume_down_color: str = "rgba(40,167,69,0.7)",
     bars: int = 120,
-    height: int = 560,
     zx_params: Optional[dict] = None,
-    show_brick: bool = False,
-    brick_params: Optional[dict] = None,
-) -> go.Figure:
-    """
-    日线图：K线 + 知行短期线 + 知行长期线 + 量能
-    知行线在完整数据上预热后截断，保证均线正确性。
-    """
-    zx_params = zx_params or {}
-
+    **_kwargs,
+) -> plt.Figure:
+    """日线图：K线 + 知行短期线 + 知行多空线 + 成交量"""
     df = df.copy()
     df["date"] = pd.to_datetime(df["date"])
     df = df.sort_values("date").reset_index(drop=True)
 
-    # 在全量数据上计算知行线，确保预热充分
-    zxdq, zxdkx = _calc_zx_lines(df, **zx_params)
-    df["_zxdq"]  = zxdq.values
+    # 全量预热知行线
+    zxdq, zxdkx = _calc_zx_lines(df, **(zx_params or {}))
+    df["_zxdq"] = zxdq.values
     df["_zxdkx"] = zxdkx.values
 
     if bars > 0:
         df = df.tail(bars).reset_index(drop=True)
 
-    x = df["date"]
-    up_mask = df["close"] >= df["open"]
+    n = len(df)
+    x = np.arange(n)
+    opens = df["open"].values.astype(float)
+    closes = df["close"].values.astype(float)
+    highs = df["high"].values.astype(float)
+    lows = df["low"].values.astype(float)
+    volumes = df["volume"].values.astype(float)
+    dates = df["date"].values
 
-    fig = make_subplots(
-        rows=2, cols=1,
-        shared_xaxes=True,
-        row_heights=[0.75, 0.25],
-        vertical_spacing=0.03,
-        subplot_titles=[f"{code}  日线", "成交量"],
-        specs=[[{"type": "candlestick"}], [{"type": "bar"}]],
+    fig, (ax_price, ax_vol) = plt.subplots(
+        2, 1, figsize=(FIG_WIDTH, FIG_HEIGHT),
+        gridspec_kw={"height_ratios": [3, 1]},
+        sharex=True,
+    )
+    fig.subplots_adjust(hspace=0.05)
+
+    # K 线
+    _draw_candlestick(ax_price, opens, closes, highs, lows, n)
+
+    # 知行线
+    zxdq_vals = df["_zxdq"].values
+    zxdkx_vals = df["_zxdkx"].values
+    valid_zxdq = ~np.isnan(zxdq_vals)
+    valid_zxdkx = ~np.isnan(zxdkx_vals)
+    if valid_zxdq.any():
+        ax_price.plot(x[valid_zxdq], zxdq_vals[valid_zxdq],
+                      color=COLOR_ZXDQ, linewidth=1.3, alpha=0.9, label="短期均线")
+    if valid_zxdkx.any():
+        ax_price.plot(x[valid_zxdkx], zxdkx_vals[valid_zxdkx],
+                      color=COLOR_ZXDKX, linewidth=1.3, alpha=0.9, linestyle="--", label="长期均线")
+
+    # 成交量
+    _draw_volume(ax_vol, x, volumes, opens, closes, n)
+
+    # X 轴日期标签
+    step = max(1, n // 12)
+    ax_vol.set_xticks(x[::step])
+    ax_vol.set_xticklabels(
+        [pd.Timestamp(d).strftime("%m-%d") for d in dates[::step]],
+        rotation=45, fontsize=8,
     )
 
-    # ── K 线 ──────────────────────────────────────────────────────────
-    fig.add_trace(go.Candlestick(
-        x=x,
-        open=df["open"], high=df["high"],
-        low=df["low"],   close=df["close"],
-        increasing_line_color="#dc3545",
-        decreasing_line_color="#28a745",
-        increasing_fillcolor="#dc3545",
-        decreasing_fillcolor="#28a745",
-        name="K线",
-        showlegend=False,
-        line=dict(width=1),
-    ), row=1, col=1)
-
-    # ── 知行线 ────────────────────────────────────────────────────────
-    fig.add_trace(go.Scatter(
-        x=x, y=df["_zxdq"],
-        mode="lines",
-        name="短期均线",
-        line=dict(color="#e67e22", width=1.5),
-    ), row=1, col=1)
-    fig.add_trace(go.Scatter(
-        x=x, y=df["_zxdkx"],
-        mode="lines",
-        name="长期均线",
-        line=dict(color="#2980b9", width=1.5, dash="dot"),
-    ), row=1, col=1)
-
-    # ── 成交量 ────────────────────────────────────────────────────────
-    vol_colors = np.where(up_mask, volume_up_color, volume_down_color)
-    fig.add_trace(go.Bar(
-        x=x, y=df["volume"],
-        marker_color=vol_colors.tolist(),
-        name="成交量",
-        showlegend=False,
-    ), row=2, col=1)
-
-    # ── 布局 ──────────────────────────────────────────────────────────
-    fig.update_layout(height=height, **_LIGHT_LAYOUT)
-    _apply_axis_style(fig, 2, _calc_rangebreaks_daily(pd.DatetimeIndex(x)))
-    for ann in fig.layout.annotations:
-        ann.font = dict(color="#636c76", size=11)
+    # 标签
+    ax_price.set_title(f"{code}  日线", fontsize=13, fontweight="bold")
+    ax_price.set_ylabel("价格", fontsize=10)
+    ax_vol.set_ylabel("成交量", fontsize=10)
+    ax_price.legend(loc="upper left", fontsize=9, framealpha=0.9)
+    ax_price.set_facecolor("white")
+    ax_vol.set_facecolor("white")
+    ax_price.grid(True, alpha=GRID_ALPHA)
+    ax_vol.grid(True, alpha=GRID_ALPHA)
 
     return fig
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 周线图：K线 + 四条 MA + 量能
+# 周线图
 # ─────────────────────────────────────────────────────────────────────────────
 
 def make_weekly_chart(
@@ -397,78 +309,64 @@ def make_weekly_chart(
     code: str,
     ma_windows: List[int] = None,
     ma_colors: Dict[int, str] = None,
-    volume_up_color: str = "rgba(220,53,69,0.7)",
-    volume_down_color: str = "rgba(40,167,69,0.7)",
     bars: int = 60,
-    height: int = 400,
-) -> go.Figure:
-    """
-    周线图：K线 + 四条 MA 均线 + 量能（纯净版，仅用于看盘与导出）。
-    df 为完整日线 DataFrame，内部聚合为周线后截取 bars 根展示。
-    rangebreaks 基于完整日线日期计算，确保节假日空周被正确排除。
-    """
+    **_kwargs,
+) -> plt.Figure:
+    """周线图：K线 + MA 均线 + 成交量"""
     ma_windows = ma_windows or [5, 10, 20, 60]
-    ma_colors  = ma_colors  or {5: "#e67e22", 10: "#27ae60", 20: "#2980b9", 60: "#8e44ad"}
-
-    # 先用完整日线数据计算 rangebreaks（截断前）
-    all_daily_dates = pd.DatetimeIndex(pd.to_datetime(df["date"]))
-    weekly_rangebreaks = _calc_rangebreaks_weekly(all_daily_dates)
+    ma_colors = ma_colors or {5: "#e67e22", 10: "#27ae60", 20: "#2980b9", 60: "#8e44ad"}
 
     wdf = _build_weekly_df(df)
-
     if bars > 0:
         wdf = wdf.tail(bars).reset_index(drop=True)
 
-    x = wdf["date"]
-    up_mask = wdf["close"] >= wdf["open"]
+    n = len(wdf)
+    x = np.arange(n)
+    opens = wdf["open"].values.astype(float)
+    closes = wdf["close"].values.astype(float)
+    highs = wdf["high"].values.astype(float)
+    lows = wdf["low"].values.astype(float)
+    volumes = wdf["volume"].values.astype(float)
+    dates = wdf["date"].values
 
-    fig = make_subplots(
-        rows=2, cols=1,
-        shared_xaxes=True,
-        row_heights=[0.75, 0.25],
-        vertical_spacing=0.04,
-        subplot_titles=[f"{code}  周线", "成交量(周)"],
-        specs=[[{"type": "candlestick"}], [{"type": "bar"}]],
+    fig, (ax_price, ax_vol) = plt.subplots(
+        2, 1, figsize=(FIG_WIDTH, FIG_HEIGHT * 0.75),
+        gridspec_kw={"height_ratios": [3, 1]},
+        sharex=True,
     )
+    fig.subplots_adjust(hspace=0.05)
 
-    # ── K 线 ──────────────────────────────────────────────────────────
-    fig.add_trace(go.Candlestick(
-        x=x,
-        open=wdf["open"], high=wdf["high"],
-        low=wdf["low"],   close=wdf["close"],
-        increasing_line_color="#dc3545",
-        decreasing_line_color="#28a745",
-        increasing_fillcolor="#dc3545",
-        decreasing_fillcolor="#28a745",
-        name="K线(周)",
-        showlegend=False,
-        line=dict(width=1),
-    ), row=1, col=1)
+    # K 线
+    _draw_candlestick(ax_price, opens, closes, highs, lows, n)
 
-    # ── MA 均线 ───────────────────────────────────────────────────────
+    # MA 均线
     for w in ma_windows:
         if len(wdf) >= w:
-            ma = _calc_ma(wdf["close"], w)
-            fig.add_trace(go.Scatter(
-                x=x, y=ma,
-                mode="lines",
-                name=f"MA{w}(周)",
-                line=dict(color=ma_colors.get(w, "#aaa"), width=1.4),
-            ), row=1, col=1)
+            ma = _calc_ma(wdf["close"], w).values
+            valid = ~np.isnan(ma)
+            if valid.any():
+                ax_price.plot(x[valid], ma[valid],
+                              color=ma_colors.get(w, "#aaa"), linewidth=1.2,
+                              label=f"MA{w}")
 
-    # ── 成交量 ────────────────────────────────────────────────────────
-    vol_colors = np.where(up_mask, volume_up_color, volume_down_color)
-    fig.add_trace(go.Bar(
-        x=x, y=wdf["volume"],
-        marker_color=vol_colors.tolist(),
-        name="成交量(周)",
-        showlegend=False,
-    ), row=2, col=1)
+    # 成交量
+    _draw_volume(ax_vol, x, volumes, opens, closes, n)
 
-    # ── 布局 ──────────────────────────────────────────────────────────
-    fig.update_layout(height=height, **_LIGHT_LAYOUT)
-    _apply_axis_style(fig, 2, weekly_rangebreaks)
-    for ann in fig.layout.annotations:
-        ann.font = dict(color="#636c76", size=11)
+    # X 轴
+    step = max(1, n // 10)
+    ax_vol.set_xticks(x[::step])
+    ax_vol.set_xticklabels(
+        [pd.Timestamp(d).strftime("%Y-%m-%d") for d in dates[::step]],
+        rotation=45, fontsize=8,
+    )
+
+    ax_price.set_title(f"{code}  周线", fontsize=13, fontweight="bold")
+    ax_price.set_ylabel("价格", fontsize=10)
+    ax_vol.set_ylabel("成交量(周)", fontsize=10)
+    ax_price.legend(loc="upper left", fontsize=9, framealpha=0.9)
+    ax_price.set_facecolor("white")
+    ax_vol.set_facecolor("white")
+    ax_price.grid(True, alpha=GRID_ALPHA)
+    ax_vol.grid(True, alpha=GRID_ALPHA)
 
     return fig

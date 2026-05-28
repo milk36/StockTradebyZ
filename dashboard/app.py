@@ -80,8 +80,6 @@ from components.charts import make_daily_chart, make_weekly_chart
 chart_cfg        = cfg.get("chart", {})
 weekly_ma_wins   = chart_cfg.get("weekly_ma_windows", [5, 10, 20, 60])
 weekly_ma_colors = {int(k): v for k, v in chart_cfg.get("weekly_ma_colors", {}).items()}
-vol_up   = chart_cfg.get("volume_up_color",  "rgba(220,53,69,0.7)")
-vol_down = chart_cfg.get("volume_down_color", "rgba(40,167,69,0.7)")
 
 candidates_map  = _load_candidates_map()
 candidate_codes = sorted(candidates_map.keys())
@@ -155,19 +153,13 @@ if df_raw.empty:
 with st.spinner("加载图表..."):
     fig_daily = make_daily_chart(
         df_raw, active_code,
-        volume_up_color=vol_up,
-        volume_down_color=vol_down,
         bars=bars,
-        height=720,
     )
-    st.plotly_chart(fig_daily, use_container_width=True, config={"scrollZoom": True})
+    st.pyplot(fig_daily)
 
     fig_weekly = make_weekly_chart(
         df_raw, active_code,
         ma_windows=weekly_ma_sel or weekly_ma_wins,
         ma_colors=weekly_ma_colors,
-        volume_up_color=vol_up,
-        volume_down_color=vol_down,
-        height=520,
     )
-    st.plotly_chart(fig_weekly, use_container_width=True, config={"scrollZoom": True})
+    st.pyplot(fig_weekly)

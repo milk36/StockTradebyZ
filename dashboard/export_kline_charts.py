@@ -3,14 +3,10 @@ scripts/export_kline_charts.py
 AgentTrader · 批量导出候选股票 K线图（日线 + 周线）
 
 用法：
-    python scripts/export_kline_charts.py [--date YYYY-MM-DD] [--bars 120] [--weekly-bars 60]
+    python scripts/export_kline_charts.py
 
 输出目录：
     data/kline/<date>/<code>_day.jpg
-    data/kline/<date>/<code>_week.jpg
-
-依赖：
-    pip install kaleido   （Plotly 静态图导出必需）
 """
 from __future__ import annotations
 
@@ -60,16 +56,12 @@ def _load_raw(code: str, raw_dir: Path) -> pd.DataFrame:
 
 # ── 导出单张图 ────────────────────────────────────────────────────────────────
 
-def _export_fig(fig, out_path: Path, width: int, height: int) -> None:
-    """将 Plotly Figure 导出为 JPEG。"""
+def _export_fig(fig, out_path: Path, dpi: int = 150) -> None:
+    """将 matplotlib Figure 导出为 JPEG。"""
+    import matplotlib.pyplot as plt
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.write_image(
-        str(out_path),
-        format="jpg",
-        width=width,
-        height=height,
-        scale=2,        # 2× 分辨率，适合屏幕阅读
-    )
+    fig.savefig(str(out_path), format="jpg", dpi=dpi, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
 
 
 # ── 主流程 ────────────────────────────────────────────────────────────────────
@@ -81,10 +73,7 @@ CONFIG = {
     "out_dir":    str(_ROOT / "data" / "kline"),
     "bars":       120,   # 日线显示 K 线数量（0 = 全部）
     "weekly_bars": 60,   # 周线显示 K 线数量（0 = 全部）
-    "day_width":  1400,
-    "day_height": 700,
-    "week_width": 1400,
-    "week_height": 700,
+    "dpi":        150,   # 输出分辨率
 }
 
 
@@ -119,27 +108,23 @@ def main() -> None:
             fig_day = make_daily_chart(
                 df_raw, code,
                 bars=CONFIG["bars"],
-                height=CONFIG["day_height"],
             )
-            _export_fig(fig_day, day_path, CONFIG["day_width"], CONFIG["day_height"])
+            _export_fig(fig_day, day_path, dpi=CONFIG["dpi"])
         except Exception as e:
             print(f"[ERROR] {code} 日线导出失败：{e}")
             skip_count += 1
             continue
 
-        # ── 周线图 ────────────────────────────────────────────────────
+        # ── 周线图（如需启用，取消下方注释）────────────────────────────
         # week_path = out_root / f"{code}_week.jpg"
         # try:
         #     fig_week = make_weekly_chart(
         #         df_raw, code,
         #         bars=CONFIG["weekly_bars"],
-        #         height=CONFIG["week_height"],
         #     )
-        #     _export_fig(fig_week, week_path, CONFIG["week_width"], CONFIG["week_height"])
+        #     _export_fig(fig_week, week_path, dpi=CONFIG["dpi"])
         # except Exception as e:
         #     print(f"[ERROR] {code} 周线导出失败：{e}")
-        #     # 日线已成功，继续计数
-        #     print(f"[OK]   {code}  日线 ✓  周线 ✗")
         #     ok_count += 1
         #     continue
 

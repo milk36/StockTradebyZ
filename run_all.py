@@ -114,6 +114,10 @@ def main() -> None:
         "--date", default=None, metavar="YYYY-MM-DD",
         help="选股基准日期（默认最新交易日）",
     )
+    parser.add_argument(
+        "--scorer", choices=["quant", "gemini"], default="quant",
+        help="步骤 4 评分方式：quant（默认，纯代码）或 gemini（AI看图）",
+    )
     args = parser.parse_args()
 
     start = args.start_from
@@ -149,12 +153,18 @@ def main() -> None:
             [PYTHON, str(ROOT / "dashboard" / "export_kline_charts.py")],
         )
 
-    # ── 步骤 4：Gemini 图表分析 ──────────────────────────────────────
+    # ── 步骤 4：评分 ──────────────────────────────────────────────
     if start <= 4 <= stop:
-        _run(
-            "4/4  Gemini 图表分析（gemini_review）",
-            [PYTHON, str(ROOT / "agent" / "gemini_review.py")],
-        )
+        if args.scorer == "quant":
+            _run(
+                "4/4  量化评分（quant_scorer — 纯代码）",
+                [PYTHON, "-m", "agent.quant_scorer"],
+            )
+        else:
+            _run(
+                "4/4  Gemini 图表分析（gemini_review）",
+                [PYTHON, str(ROOT / "agent" / "gemini_review.py")],
+            )
 
     # ── 步骤 5：打印推荐结果 ─────────────────────────────────────────
     print(f"\n{'='*60}")

@@ -38,8 +38,9 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 class TdxKlineFetcher:
     """封装 mootdx Reader，读取本地通达信行情数据并输出 CSV。"""
 
-    def __init__(self, tdxdir: str, market: str = "std"):
+    def __init__(self, tdxdir: str, market: str = "std", qfq: bool = False):
         self._reader = Reader.factory(market=market, tdxdir=tdxdir)
+        self._qfq = qfq
 
     def fetch_one(self, code: str, start: Optional[str] = None, end: Optional[str] = None) -> pd.DataFrame:
         """读取单只股票日线数据。
@@ -62,7 +63,40 @@ class TdxKlineFetcher:
             return pd.DataFrame()
 
         df = self._normalize(df, start, end)
+
+        if self._qfq and not df.empty:
+            try:
+                from qfq import apply_qfq
+                df = apply_qfq(df, code)
+            except Exception as e:
+                logger.debug("QFQ 失败 %s: %s，使用原始数据", code, e)
+
         return df
+
+    def fetch_batch(
+        self,
+        codes: list[str],
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        workers: int = 4,
+    ) -> dict[str, pd.DataFrame]:
+        """批量读取多只股票，返回 {code: DataFrame}。"""
+        result: dict[str, pd.DataFrame] = {}
+
+        def _one(code: str) -> tuple[str, pd.DataFrame]:
+            return code, self.fetch_one(code, start, end)
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(_one, c): c for c in codes}
+            for fut in as_completed(futures):
+                try:
+                    code, df = fut.result()
+                    if not df.empty:
+                        result[code] = df
+                except Exception as e:
+                    logger.debug("fetch_batch %s 失败: %s", futures[fut], e)
+
+        return result
 
     @staticmethod
     def _normalize(df: pd.DataFrame, start: Optional[str], end: Optional[str]) -> pd.DataFrame:
@@ -94,6 +128,45 @@ class TdxKlineFetcher:
 
         df = df.sort_values("date").reset_index(drop=True)
         return df
+
+
+def load_tdx_to_dict(config_path: Optional[Path] = None) -> dict[str, pd.DataFrame]:
+    """从配置文件读取参数，批量加载 TDX 数据到内存 dict。
+
+    Returns:
+        {code: DataFrame}，每只股票的标准化日线数据。
+    """
+    if config_path is None:
+        config_path = _CONFIG_PATH
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+
+    tdx_cfg = cfg.get("tdx", {})
+    tdxdir = tdx_cfg.get("tdxdir", r"D:\Tools\tdx_64")
+    market = tdx_cfg.get("market", "std")
+    qfq = tdx_cfg.get("qfq", False)
+
+    raw_start = str(cfg.get("start", "20190101"))
+    raw_end = str(cfg.get("end", "today"))
+    start = dt.date.today().strftime("%Y%m%d") if raw_start.lower() == "today" else raw_start
+    end = dt.date.today().strftime("%Y%m%d") if raw_end.lower() == "today" else raw_end
+
+    stocklist_path = _resolve_cfg_path(cfg.get("stocklist", "./pipeline/stocklist.csv"))
+    exclude_boards = set(cfg.get("exclude_boards") or [])
+    codes = load_codes_from_stocklist(stocklist_path, exclude_boards)
+
+    if not codes:
+        raise ValueError("stocklist 为空或被过滤后无代码")
+
+    logger.info(
+        "load_tdx_to_dict: %d 只股票 | tdxdir=%s | 日期 %s → %s | qfq=%s",
+        len(codes), tdxdir, start, end, qfq,
+    )
+
+    fetcher = TdxKlineFetcher(tdxdir=tdxdir, market=market, qfq=qfq)
+    workers = min(int(cfg.get("workers", 8)), 4)
+    return fetcher.fetch_batch(codes, start, end, workers)
 
 
 def fetch_one_to_csv(
@@ -139,8 +212,9 @@ def main(config_path: Optional[Path] = None, log_path: Optional[Path] = None) ->
     tdx_cfg = cfg.get("tdx", {})
     tdxdir = tdx_cfg.get("tdxdir", r"D:\Tools\tdx_64")
     market = tdx_cfg.get("market", "std")
+    qfq = tdx_cfg.get("qfq", False)
 
-    logger.info("通达信路径: %s, 市场: %s", tdxdir, market)
+    logger.info("通达信路径: %s, 市场: %s, 前复权: %s", tdxdir, market, qfq)
 
     # 日期范围
     raw_start = str(cfg.get("start", "20190101"))
@@ -167,7 +241,7 @@ def main(config_path: Optional[Path] = None, log_path: Optional[Path] = None) ->
     )
 
     # 批量读取
-    fetcher = TdxKlineFetcher(tdxdir=tdxdir, market=market)
+    fetcher = TdxKlineFetcher(tdxdir=tdxdir, market=market, qfq=qfq)
     workers = min(int(cfg.get("workers", 8)), 4)  # 本地文件读取不需要太多线程
 
     ok_count = 0

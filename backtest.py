@@ -90,15 +90,16 @@ def build_date_index(df: pd.DataFrame) -> dict:
 def prepare_data_once(
     data: Dict[str, pd.DataFrame],
     end_date: str,
+    selector=None,
 ) -> Dict[str, pd.DataFrame]:
-    """对所有股票做一次预处理（turnover_n + set_index），返回可复用的 prepared 数据。"""
+    """对所有股票做一次预处理（turnover_n + set_index + B1指标），返回可复用的 prepared 数据。"""
     from pipeline_core import MarketDataPreparer
 
     preparer = MarketDataPreparer(
         end_date=pd.to_datetime(end_date),
         warmup_bars=500,
         n_turnover_days=43,
-        selector=None,
+        selector=selector,
     )
     return preparer.prepare(data)
 
@@ -106,31 +107,13 @@ def prepare_data_once(
 def preselect_on_date(
     pick_date: pd.Timestamp,
     prepared: Dict[str, pd.DataFrame],
-    top_m: int,
-    cfg_b1: dict,
+    pool_dict: dict,
+    selector,
 ) -> List[str]:
     """在已预处理数据上做单日选股（纯内存操作，无多进程开销）。"""
-    from Selector import B1Selector
-    from pipeline_core import TopTurnoverPoolBuilder
-
-    # 流动性池
-    pool_codes = TopTurnoverPoolBuilder(top_m=top_m).build(prepared).get(pick_date, [])
+    pool_codes = pool_dict.get(pick_date, [])
     if not pool_codes:
         return []
-
-    # B1 策略（直接在 prepared 上运行）
-    if not cfg_b1.get("enabled", True):
-        return []
-
-    from select_stock import _sorted_zx
-    zx_m1, zx_m2, zx_m3, zx_m4 = _sorted_zx(
-        cfg_b1["zx_m1"], cfg_b1["zx_m2"], cfg_b1["zx_m3"], cfg_b1["zx_m4"]
-    )
-    selector = B1Selector(
-        j_threshold=float(cfg_b1["j_threshold"]),
-        j_q_threshold=float(cfg_b1["j_q_threshold"]),
-        zx_m1=zx_m1, zx_m2=zx_m2, zx_m3=zx_m3, zx_m4=zx_m4,
-    )
 
     codes = []
     for code in pool_codes:
@@ -138,8 +121,7 @@ def preselect_on_date(
         if df is None or pick_date not in df.index:
             continue
         try:
-            pf = selector.prepare_df(df)
-            if selector.vec_picks_from_prepared(pf, start=pick_date, end=pick_date):
+            if selector.vec_picks_from_prepared(df, start=pick_date, end=pick_date):
                 codes.append(code)
         except Exception:
             pass
@@ -227,15 +209,17 @@ def _score_stock_worker(code: str, df_bytes: bytes) -> tuple:
 def _score_codes_parallel(
     pool: ProcessPoolExecutor,
     codes: List[str],
-    data: Dict[str, pd.DataFrame],
+    enriched: Dict[str, pd.DataFrame],
+    date: pd.Timestamp,
 ) -> List[tuple]:
     """并行评分多只股票，返回 [(code, result_dict), ...]。"""
     futures = []
     for code in codes:
-        df = data.get(code)
+        df = enriched.get(code)
         if df is None:
             continue
-        futures.append(pool.submit(_score_stock_worker, code, pickle.dumps(df)))
+        df_slice = df.loc[:date]
+        futures.append(pool.submit(_score_stock_worker, code, pickle.dumps(df_slice)))
     results = []
     for f in as_completed(futures):
         try:
@@ -282,20 +266,20 @@ def print_summary(all_trades: List[Trade], dates_run: int) -> None:
     print("=" * 60)
 
 
-def save_detail_csv(trades: List[Trade], date_str: str, out_dir: Path) -> None:
+def _trade_to_row(t: Trade) -> dict:
+    return {
+        "code": t.code, "select_date": t.select_date,
+        "buy_date": t.buy_date, "sell_date": t.sell_date,
+        "buy_price": f"{t.buy_price:.2f}", "sell_price": f"{t.sell_price:.2f}",
+        "return_pct": f"{t.return_pct:.2f}", "hold_days": t.hold_days,
+        "status": t.status, "score": t.total_score,
+    }
+
+
+def save_detail_csv(all_trades: List[Trade], out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    rows = [
-        {
-            "code": t.code, "select_date": t.select_date,
-            "buy_date": t.buy_date, "sell_date": t.sell_date,
-            "buy_price": f"{t.buy_price:.2f}", "sell_price": f"{t.sell_price:.2f}",
-            "return_pct": f"{t.return_pct:.2f}", "hold_days": t.hold_days,
-            "status": t.status, "score": t.total_score,
-        }
-        for t in trades
-    ]
-    pd.DataFrame(rows).to_csv(
-        out_dir / f"backtest_detail_{date_str.replace('-', '')}.csv", index=False)
+    rows = [_trade_to_row(t) for t in all_trades]
+    pd.DataFrame(rows).to_csv(out_dir / "backtest_detail_all.csv", index=False)
 
 
 def save_summary_log(all_trades: List[Trade], dates_run: int, out_dir: Path) -> None:
@@ -335,6 +319,28 @@ def save_summary_log(all_trades: List[Trade], dates_run: int, out_dir: Path) -> 
         f.write(f"{'总计':<12} {total_all:>6} {profit_all:>6} {loss_all:>6} {avg_all:>9.2f}% {wr_all:>7.1f}%\n")
         f.write("=" * 60 + "\n")
 
+        # 每笔交易明细
+        f.write("\n")
+        f.write("=" * 100 + "\n")
+        f.write("交易明细\n")
+        f.write("=" * 100 + "\n")
+        header = (
+            f"{'选股日':<12} {'代码':<8} {'买入日':<12} {'卖出日':<12} "
+            f"{'买入价':>8} {'卖出价':>8} {'收益':>8} {'持仓':>4} "
+            f"{'结果':<4} {'评分':>5}\n"
+        )
+        f.write(header)
+        f.write("-" * 100 + "\n")
+
+        for date_str in sorted(by_date.keys()):
+            for t in sorted(by_date[date_str], key=lambda x: -x.return_pct):
+                f.write(
+                    f"{t.select_date:<12} {t.code:<8} {t.buy_date:<12} {t.sell_date:<12} "
+                    f"{t.buy_price:>8.2f} {t.sell_price:>8.2f} "
+                    f"{t.return_pct:>+7.2f}% {t.hold_days:>4} "
+                    f"{'盈' if t.status == 'profit' else '亏':<4} {t.total_score:>5.1f}\n"
+                )
+
     print(f"\n明细和汇总已保存至 {out_dir}/")
 
 
@@ -364,21 +370,44 @@ def main() -> None:
         data = load_all_data(args.data)
     print(f"[INFO] 加载 {len(data)} 只股票")
 
+    # 预计算评分指标 + 设置日期索引（用于按日切片）
+    print("[INFO] 预计算评分指标...")
+    from quant_scorer import precompute_score_columns
+    enriched: Dict[str, pd.DataFrame] = {}
+    for code, df in data.items():
+        df = precompute_score_columns(df)
+        df = df.set_index("date").sort_index()
+        enriched[code] = df
+    print(f"[INFO] 预计算完成，{len(enriched)} 只股票")
+
     trading_dates = get_trading_dates(data, args.start, args.end)
     print(f"[INFO] 回测区间: {args.start} ~ {args.end}，共 {len(trading_dates)} 个交易日")
     print(f"[INFO] 参数: 评分≥{args.score}, 止盈+{args.target*100:.0f}%, 最大持仓{args.hold}天")
 
-    # 一次性预处理（最耗时的步骤，只做一次）
-    print(f"[INFO] 预处理数据（一次性，约10秒）...")
-    prepared = prepare_data_once(data, args.end)
-    print(f"[INFO] 预处理完成，{len(prepared)} 只股票")
-
-    # 加载选股配置
-    from select_stock import load_config
+    # 加载选股配置 + 创建 B1 selector（循环外一次性创建）
+    from select_stock import load_config, _sorted_zx
+    from Selector import B1Selector
     cfg = load_config()
     g = cfg.get("global", {})
     top_m = int(g.get("top_m", 20))
     cfg_b1 = cfg.get("b1", {})
+    zx_m1, zx_m2, zx_m3, zx_m4 = _sorted_zx(
+        cfg_b1["zx_m1"], cfg_b1["zx_m2"], cfg_b1["zx_m3"], cfg_b1["zx_m4"]
+    )
+    b1_selector = B1Selector(
+        j_threshold=float(cfg_b1["j_threshold"]),
+        j_q_threshold=float(cfg_b1["j_q_threshold"]),
+        zx_m1=zx_m1, zx_m2=zx_m2, zx_m3=zx_m3, zx_m4=zx_m4,
+    ) if cfg_b1.get("enabled", True) else None
+
+    # 一次性预处理（含 B1 指标预计算 + 流动性池构建）
+    print("[INFO] 预处理数据（含 B1 指标预计算）...")
+    prepared = prepare_data_once(data, args.end, selector=b1_selector)
+    print(f"[INFO] 预处理完成，{len(prepared)} 只股票")
+
+    from pipeline_core import TopTurnoverPoolBuilder
+    pool_dict = TopTurnoverPoolBuilder(top_m=top_m).build(prepared)
+    print(f"[INFO] 流动性池已构建")
 
     date_indices: Dict[str, dict] = {}
     all_trades: List[Trade] = []
@@ -390,18 +419,18 @@ def main() -> None:
 
     try:
         for date in tqdm(trading_dates, desc="回测进度", ncols=80):
-            codes = preselect_on_date(date, prepared, top_m, cfg_b1)
+            codes = preselect_on_date(date, prepared, pool_dict, b1_selector)
             if not codes:
                 continue
 
-            # 评分阶段（并行 or 串行）
+            # 评分阶段（并行 or 串行），按日期切片避免未来数据泄漏
             if use_parallel:
-                scored = _score_codes_parallel(pool, codes, data)
+                scored = _score_codes_parallel(pool, codes, enriched, date)
             else:
                 from quant_scorer import score_stock
                 scored = [
-                    (c, score_stock(c, data[c]))
-                    for c in codes if c in data
+                    (c, score_stock(c, enriched[c].loc[:date]))
+                    for c in codes if c in enriched
                 ]
 
             # 模拟交易（串行，很快）
@@ -420,7 +449,6 @@ def main() -> None:
                     day_trades.append(trade)
 
             if day_trades:
-                save_detail_csv(day_trades, str(date.date()), ROOT / "backtest_results")
                 all_trades.extend(day_trades)
     finally:
         if pool is not None:
@@ -429,7 +457,9 @@ def main() -> None:
     # 汇总
     print_summary(all_trades, len(trading_dates))
     if all_trades:
-        save_summary_log(all_trades, len(trading_dates), ROOT / "backtest_results")
+        out_dir = ROOT / "backtest_results"
+        save_detail_csv(all_trades, out_dir)
+        save_summary_log(all_trades, len(trading_dates), out_dir)
 
 
 if __name__ == "__main__":

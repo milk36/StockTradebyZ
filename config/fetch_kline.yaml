@@ -30,4 +30,4 @@ tdx:
   enabled: true 
   tdxdir: "D:\\Tools\\tdx_64"   # 通达信安装路径
   market: "std"                  # 市场类型：std=标准市场
-  qfq: true                     # 是否应用前复权（需 akshare）
+  qfq: false                    # 是否应用前复权（需 akshare，首次较慢）
